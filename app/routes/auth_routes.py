@@ -6,6 +6,7 @@ from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from pydantic import BaseModel, EmailStr
 from typing import Optional, List
 from datetime import datetime
+import logging
 from app.firebase_config import auth_client, db
 from slowapi import Limiter
 from slowapi.util import get_remote_address
@@ -93,7 +94,6 @@ async def login_user(credentials: UserLoginRequest, request: Request):
         user = auth_client.get_user(uid)
         
         # Log de auditoría
-        import logging
         logging.info(f"Usuario {user.email} inició sesión exitosamente")
         
         return {
