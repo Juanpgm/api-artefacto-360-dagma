@@ -15,6 +15,7 @@
 ### 🎯 Endpoints Verificados:
 
 #### 1. POST /auth/login
+
 - **URL**: `http://localhost:8000/auth/login`
 - **Método**: POST
 - **Body**: `{ "id_token": "FIREBASE_ID_TOKEN" }`
@@ -35,6 +36,7 @@
 - **Rate Limit**: 5 intentos por minuto
 
 #### 2. POST /auth/validate-session
+
 - **URL**: `http://localhost:8000/auth/validate-session`
 - **Método**: POST
 - **Header**: `Authorization: Bearer FIREBASE_ID_TOKEN`
@@ -60,7 +62,7 @@
 ✅ Endpoint /auth/validate-session - Funcionando  
 ✅ Sistema de Logging - Funcionando (registra intentos de login en audit.log)  
 ✅ Manejo de Errores - Funcionando  
-✅ Rate Limiting - Configurado (5 intentos/minuto)  
+✅ Rate Limiting - Configurado (5 intentos/minuto)
 
 ### 🔄 Flujo de Autenticación:
 
@@ -81,29 +83,31 @@
 ### 📝 Código de Ejemplo para Frontend:
 
 #### JavaScript/React:
+
 ```javascript
 // Después de autenticar con Firebase
 const idToken = await user.getIdToken();
 
 // Enviar al backend
-const response = await fetch('http://localhost:8000/auth/login', {
-  method: 'POST',
+const response = await fetch("http://localhost:8000/auth/login", {
+  method: "POST",
   headers: {
-    'Content-Type': 'application/json',
+    "Content-Type": "application/json",
   },
-  body: JSON.stringify({ id_token: idToken })
+  body: JSON.stringify({ id_token: idToken }),
 });
 
 const data = await response.json();
 
 if (data.success) {
-  console.log('Usuario autenticado:', data.user);
+  console.log("Usuario autenticado:", data.user);
   // Guardar en localStorage o estado
-  localStorage.setItem('user', JSON.stringify(data.user));
+  localStorage.setItem("user", JSON.stringify(data.user));
 }
 ```
 
 #### Python (para testing):
+
 ```python
 import requests
 
@@ -154,7 +158,7 @@ else:
 ✅ Rate limiting activo (5 intentos/minuto)  
 ✅ Logging de auditoría funcionando  
 ✅ Manejo seguro de errores (no expone información sensible)  
-✅ CORS configurado para dominios específicos  
+✅ CORS configurado para dominios específicos
 
 ### 📞 Endpoints Adicionales Disponibles:
 

@@ -9,20 +9,21 @@
 
 ### 📊 Resumen de Tests Ejecutados
 
-| # | Test | Estado | Resultado |
-|---|------|--------|-----------|
-| 1 | Health Check de la API | ✅ PASS | API activa y respondiendo |
-| 2 | Login con tokens inválidos | ✅ PASS | 3/3 casos rechazados correctamente (401) |
-| 3 | Creación de Custom Token | ✅ PASS | Token de 855 caracteres generado |
-| 4 | Información de Usuarios | ✅ PASS | 1 usuario encontrado en Firebase |
-| 5 | Validación de Sesión | ✅ PASS | Token inválido rechazado (401) |
-| 6 | Rate Limiting | ✅ PASS | Límite aplicado después de 5 peticiones |
+| #   | Test                       | Estado  | Resultado                                |
+| --- | -------------------------- | ------- | ---------------------------------------- |
+| 1   | Health Check de la API     | ✅ PASS | API activa y respondiendo                |
+| 2   | Login con tokens inválidos | ✅ PASS | 3/3 casos rechazados correctamente (401) |
+| 3   | Creación de Custom Token   | ✅ PASS | Token de 855 caracteres generado         |
+| 4   | Información de Usuarios    | ✅ PASS | 1 usuario encontrado en Firebase         |
+| 5   | Validación de Sesión       | ✅ PASS | Token inválido rechazado (401)           |
+| 6   | Rate Limiting              | ✅ PASS | Límite aplicado después de 5 peticiones  |
 
 ---
 
 ## 📋 Detalles de los Tests
 
 ### 🏥 TEST 1: Health Check
+
 ```json
 {
   "status": "healthy",
@@ -30,6 +31,7 @@
   "version": "1.0.0"
 }
 ```
+
 **Resultado:** ✅ API operativa
 
 ---
@@ -37,18 +39,21 @@
 ### 🔴 TEST 2: Tokens Inválidos
 
 #### Caso 1: Token string simple (`"invalid_token"`)
+
 - **Status:** 401 Unauthorized
 - **Mensaje:** "Token inválido"
 - **Log:** `Wrong number of segments in token: b'invalid_token'`
 - **Resultado:** ✅ Rechazado correctamente
 
 #### Caso 2: Token vacío (`""`)
+
 - **Status:** 401 Unauthorized
 - **Mensaje:** "Token inválido"
 - **Log:** `Illegal ID token provided: b''. ID token must be a non-empty string.`
 - **Resultado:** ✅ Rechazado correctamente
 
 #### Caso 3: Token JWT falso
+
 - **Status:** 401 Unauthorized
 - **Mensaje:** "Token inválido"
 - **Log:** `Invalid base64-encoded string`
@@ -76,9 +81,9 @@ UID: test_user_123
 
 Se encontraron usuarios registrados:
 
-| Email | UID | Nombre | Verificado |
-|-------|-----|--------|------------|
-| juanp.gzmz@gmail.com | 87H5286w1NbhXdLfnLfnVvlegbK2 | Sin nombre | ❌ No |
+| Email                | UID                          | Nombre     | Verificado |
+| -------------------- | ---------------------------- | ---------- | ---------- |
+| juanp.gzmz@gmail.com | 87H5286w1NbhXdLfnLfnVvlegbK2 | Sin nombre | ❌ No      |
 
 **Resultado:** ✅ Conexión con Firebase Authentication exitosa
 
@@ -93,6 +98,7 @@ Authorization: Bearer invalid_token
 ```
 
 **Respuesta:**
+
 ```json
 {
   "detail": "Token inválido"
@@ -109,16 +115,17 @@ Se realizaron 6 peticiones rápidas al endpoint de login.
 
 **Configuración:** 5 peticiones por minuto
 
-| Petición | Status | Resultado |
-|----------|--------|-----------|
-| 1 | 401 | Token inválido (esperado) |
-| 2 | 401 | Token inválido (esperado) |
-| 3 | 429 | **Rate limit excedido** ✅ |
-| 4 | 429 | Rate limit excedido ✅ |
-| 5 | 429 | Rate limit excedido ✅ |
-| 6 | 429 | Rate limit excedido ✅ |
+| Petición | Status | Resultado                  |
+| -------- | ------ | -------------------------- |
+| 1        | 401    | Token inválido (esperado)  |
+| 2        | 401    | Token inválido (esperado)  |
+| 3        | 429    | **Rate limit excedido** ✅ |
+| 4        | 429    | Rate limit excedido ✅     |
+| 5        | 429    | Rate limit excedido ✅     |
+| 6        | 429    | Rate limit excedido ✅     |
 
 **Logs de Rate Limiting:**
+
 ```
 2026-02-04 23:34:17,541 - slowapi - WARNING - ratelimit 5 per 1 minute (127.0.0.1) exceeded at endpoint: /auth/login
 2026-02-04 23:34:19,548 - slowapi - WARNING - ratelimit 5 per 1 minute (127.0.0.1) exceeded at endpoint: /auth/login
@@ -171,31 +178,33 @@ Se realizaron 6 peticiones rápidas al endpoint de login.
 Para probar con un **token real de Firebase:**
 
 ### Opción 1: Desde el Frontend
+
 ```javascript
-import { signInWithEmailAndPassword } from 'firebase/auth';
+import { signInWithEmailAndPassword } from "firebase/auth";
 
 // Autenticar usuario
 const userCredential = await signInWithEmailAndPassword(
-  auth, 
-  'juanp.gzmz@gmail.com', 
-  'tu_password'
+  auth,
+  "juanp.gzmz@gmail.com",
+  "tu_password",
 );
 
 // Obtener ID token
 const idToken = await userCredential.user.getIdToken();
 
 // Probar login
-const response = await fetch('http://localhost:8000/auth/login', {
-  method: 'POST',
-  headers: { 'Content-Type': 'application/json' },
-  body: JSON.stringify({ id_token: idToken })
+const response = await fetch("http://localhost:8000/auth/login", {
+  method: "POST",
+  headers: { "Content-Type": "application/json" },
+  body: JSON.stringify({ id_token: idToken }),
 });
 
 const data = await response.json();
-console.log('Login exitoso:', data);
+console.log("Login exitoso:", data);
 ```
 
 ### Opción 2: Registrar Usuario de Prueba
+
 ```bash
 curl -X POST "http://localhost:8000/auth/register" \
   -H "Content-Type: application/json" \

@@ -1,5 +1,8 @@
-# Firebase service account key
+# Firebase service account keys - TODOS los archivos JSON de Firebase
 firebase-service-account.json
+*firebase*.json
+dagma-*.json
+env/*.json
 
 # Python
 __pycache__/
