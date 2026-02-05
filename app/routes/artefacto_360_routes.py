@@ -7,11 +7,14 @@ from datetime import datetime
 import json
 import uuid
 import math
+import os
+import io
 from pydantic import BaseModel, Field
 
 # Importar configuración de Firebase y S3/Storage
 from app.firebase_config import db
-# import boto3
+import boto3
+from botocore.exceptions import ClientError
 
 router = APIRouter(tags=["Artefacto de Captura DAGMA"])
 
@@ -31,6 +34,81 @@ def clean_nan_values(obj):
         return obj
     else:
         return obj
+
+
+def validate_coordinates(coordinates: list, geometry_type: str) -> bool:
+    """
+    Valida coordenadas según el tipo de geometría
+    """
+    if not isinstance(coordinates, list):
+        raise ValueError("Las coordenadas deben ser un array")
+    
+    if geometry_type == "Point":
+        if len(coordinates) != 2:
+            raise ValueError("Point debe tener exactamente 2 coordenadas [lon, lat]")
+        lon, lat = coordinates
+        if not isinstance(lon, (int, float)) or not isinstance(lat, (int, float)):
+            raise ValueError("Las coordenadas deben ser números")
+        if not (-180 <= lon <= 180):
+            raise ValueError(f"Longitud inválida: {lon}. Debe estar entre -180 y 180")
+        if not (-90 <= lat <= 90):
+            raise ValueError(f"Latitud inválida: {lat}. Debe estar entre -90 y 90")
+    
+    elif geometry_type in ["LineString", "MultiPoint"]:
+        if len(coordinates) < 2:
+            raise ValueError(f"{geometry_type} debe tener al menos 2 puntos")
+        for point in coordinates:
+            if not isinstance(point, list) or len(point) != 2:
+                raise ValueError("Cada punto debe ser [lon, lat]")
+            lon, lat = point
+            if not (-180 <= lon <= 180) or not (-90 <= lat <= 90):
+                raise ValueError(f"Coordenadas fuera de rango: [{lon}, {lat}]")
+    
+    elif geometry_type == "Polygon":
+        if len(coordinates) < 1:
+            raise ValueError("Polygon debe tener al menos un anillo")
+        for ring in coordinates:
+            if not isinstance(ring, list) or len(ring) < 4:
+                raise ValueError("Cada anillo del polígono debe tener al menos 4 puntos")
+    
+    return True
+
+
+def validate_photo_file(file: UploadFile) -> bool:
+    """
+    Valida que el archivo sea una imagen válida
+    """
+    # Validar tipo MIME
+    allowed_types = ["image/jpeg", "image/jpg", "image/png", "image/webp", "image/heic"]
+    if file.content_type not in allowed_types:
+        raise ValueError(f"Tipo de archivo no permitido: {file.content_type}. Permitidos: {', '.join(allowed_types)}")
+    
+    # Validar extensión
+    allowed_extensions = [".jpg", ".jpeg", ".png", ".webp", ".heic"]
+    file_ext = os.path.splitext(file.filename)[1].lower()
+    if file_ext not in allowed_extensions:
+        raise ValueError(f"Extensión no permitida: {file_ext}")
+    
+    return True
+
+
+def get_s3_client():
+    """
+    Crear cliente de S3 con las credenciales del entorno
+    """
+    aws_access_key = os.getenv('AWS_ACCESS_KEY_ID')
+    aws_secret_key = os.getenv('AWS_SECRET_ACCESS_KEY')
+    aws_region = os.getenv('AWS_REGION', 'us-east-1')
+    
+    if not aws_access_key or not aws_secret_key:
+        raise ValueError("Credenciales de AWS no configuradas. Verifica AWS_ACCESS_KEY_ID y AWS_SECRET_ACCESS_KEY")
+    
+    return boto3.client(
+        's3',
+        aws_access_key_id=aws_access_key,
+        aws_secret_access_key=aws_secret_key,
+        region_name=aws_region
+    )
 
 
 # ==================== MODELOS ====================#
@@ -185,18 +263,53 @@ async def post_reconocimiento(
     Registrar un reconocimiento del grupo operativo DAGMA
     """
     try:
+        # Validar tipo de geometría
+        valid_geometry_types = ["Point", "LineString", "Polygon", "MultiPoint", "MultiLineString", "MultiPolygon"]
+        if coordinates_type not in valid_geometry_types:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Tipo de geometría inválido. Permitidos: {', '.join(valid_geometry_types)}"
+            )
+        
+        # Validar cantidad de fotos
+        if not photos or len(photos) == 0:
+            raise HTTPException(
+                status_code=400,
+                detail="Debe proporcionar al menos una foto"
+            )
+        
+        if len(photos) > 10:
+            raise HTTPException(
+                status_code=400,
+                detail="Máximo 10 fotos por reconocimiento"
+            )
+        
+        # Validar cada foto
+        for photo in photos:
+            try:
+                validate_photo_file(photo)
+            except ValueError as e:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Error en archivo '{photo.filename}': {str(e)}"
+                )
+        
         # Generar ID único para el reconocimiento
         reconocimiento_id = str(uuid.uuid4())
         
-        # Parsear coordenadas
+        # Parsear y validar coordenadas
         try:
             coordinates = json.loads(coordinates_data)
-            if not isinstance(coordinates, list) or len(coordinates) < 2:
-                raise ValueError("Las coordenadas deben ser un array con al menos 2 números")
+            validate_coordinates(coordinates, coordinates_type)
         except json.JSONDecodeError:
             raise HTTPException(
                 status_code=400,
                 detail="Formato de coordenadas inválido. Debe ser un JSON array válido"
+            )
+        except ValueError as e:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Error en coordenadas: {str(e)}"
             )
         
         # Crear objeto de geometría
@@ -205,21 +318,63 @@ async def post_reconocimiento(
             "coordinates": coordinates
         }
         
-        # TODO: Subir fotos a S3/Firebase Storage
+        # Obtener cliente S3 y bucket name
+        bucket_name = os.getenv('S3_BUCKET_NAME', '360-dagma-photos')
+        
+        # Subir fotos a S3
         photos_urls = []
-        for photo in photos:
+        s3_client = None
+        
+        try:
+            s3_client = get_s3_client()
+        except ValueError as e:
+            # Si no hay credenciales de S3, advertir pero continuar (modo desarrollo)
+            print(f"⚠️ ADVERTENCIA: {str(e)}. Las fotos NO se subirán a S3.")
+        
+        for i, photo in enumerate(photos):
             # Generar nombre único para la foto
             timestamp = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
-            photo_filename = f"{timestamp}_{photo.filename}"
+            # Sanitizar el nombre del archivo
+            safe_filename = "".join(c for c in photo.filename if c.isalnum() or c in "._-")
+            photo_filename = f"{timestamp}_{i}_{safe_filename}"
             
-            # TODO: Implementar subida a S3
-            # s3_key = f"reconocimientos/{reconocimiento_id}/{photo_filename}"
-            # s3_client.upload_fileobj(photo.file, "360-dagma-photos", s3_key)
-            # photo_url = f"https://360-dagma-photos.s3.amazonaws.com/{s3_key}"
+            s3_key = f"reconocimientos/{reconocimiento_id}/{photo_filename}"
             
-            # URL temporal de ejemplo
-            photo_url = f"https://360-dagma-photos.s3.amazonaws.com/reconocimientos/{reconocimiento_id}/{photo_filename}"
-            photos_urls.append(photo_url)
+            if s3_client:
+                try:
+                    # Leer el contenido del archivo
+                    photo_content = await photo.read()
+                    
+                    # Subir a S3
+                    # Nota: No se usa ACL porque muchos buckets modernos tienen ACLs deshabilitadas
+                    # La accesibilidad pública se configura mediante Bucket Policy en AWS Console
+                    s3_client.upload_fileobj(
+                        io.BytesIO(photo_content),
+                        bucket_name,
+                        s3_key,
+                        ExtraArgs={
+                            'ContentType': photo.content_type
+                        }
+                    )
+                    
+                    # Generar URL pública
+                    photo_url = f"https://{bucket_name}.s3.amazonaws.com/{s3_key}"
+                    photos_urls.append(photo_url)
+                    
+                    # Rebobinar el archivo para futuras lecturas si es necesario
+                    await photo.seek(0)
+                    
+                except ClientError as e:
+                    print(f"❌ Error subiendo foto a S3: {str(e)}")
+                    raise HTTPException(
+                        status_code=500,
+                        detail=f"Error subiendo foto '{photo.filename}' a S3: {str(e)}"
+                    )
+            else:
+                # Modo desarrollo: generar URL ficticia
+                photo_url = f"https://{bucket_name}.s3.amazonaws.com/{s3_key}"
+                photos_urls.append(photo_url)
+                print(f"⚠️ Modo desarrollo: URL ficticia generada para {photo.filename}")
         
         # Preparar datos para guardar en Firebase
         reconocimiento_data = {
@@ -235,8 +390,24 @@ async def post_reconocimiento(
             "timestamp": datetime.utcnow().isoformat()
         }
         
-        # TODO: Guardar en Firebase
-        # db.collection('reconocimientos_dagma').document(reconocimiento_id).set(reconocimiento_data)
+        # Guardar en Firebase
+        try:
+            db.collection('reconocimientos_dagma').document(reconocimiento_id).set(reconocimiento_data)
+            print(f"✅ Reconocimiento {reconocimiento_id} guardado en Firebase")
+        except Exception as e:
+            print(f"❌ Error guardando en Firebase: {str(e)}")
+            # Si falla Firebase, intentar eliminar fotos de S3 (rollback)
+            if s3_client:
+                for photo_url in photos_urls:
+                    try:
+                        s3_key = photo_url.split('.com/')[-1]
+                        s3_client.delete_object(Bucket=bucket_name, Key=s3_key)
+                    except:
+                        pass
+            raise HTTPException(
+                status_code=500,
+                detail=f"Error guardando en Firebase: {str(e)}"
+            )
         
         return ReconocimientoResponse(
             success=True,

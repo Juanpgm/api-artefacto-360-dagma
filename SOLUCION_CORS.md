@@ -258,6 +258,7 @@ python test_api_connection.py
 **Tiempo estimado:** 5-10 minutos (incluyendo despliegue de Railway)
 
 **¿Cuál opción prefieres?**
+
 - 🎨 Opción A: Configurar proxy local (más rápido, sin esperar despliegue)
 - 🌍 Opción B: Esperar despliegue en Railway (más simple)
 
@@ -266,6 +267,7 @@ python test_api_connection.py
 ## 🚀 Producción en Vercel
 
 ### 📍 URL de Frontend en Producción:
+
 ```
 https://dagma-360-capture-frontend.vercel.app
 ```
@@ -301,6 +303,7 @@ print('CORS Origin:', r.headers.get('Access-Control-Allow-Origin', 'No configura
 ```
 
 Debe mostrar:
+
 ```
 Status: 200
 CORS Origin: https://dagma-360-capture-frontend.vercel.app
@@ -309,6 +312,7 @@ CORS Origin: https://dagma-360-capture-frontend.vercel.app
 ### 🌐 Verificar en el Frontend de Producción
 
 1. **Abre tu app en Vercel:**
+
    ```
    https://dagma-360-capture-frontend.vercel.app
    ```
@@ -317,13 +321,13 @@ CORS Origin: https://dagma-360-capture-frontend.vercel.app
 
 3. **Ejecuta este test:**
    ```javascript
-   fetch('https://web-production-2d737.up.railway.app/init/parques')
-     .then(r => r.json())
-     .then(data => {
-       console.log('✅ Parques cargados:', data.count);
-       console.log('Primer parque:', data.data[0]);
+   fetch("https://web-production-2d737.up.railway.app/init/parques")
+     .then((r) => r.json())
+     .then((data) => {
+       console.log("✅ Parques cargados:", data.count);
+       console.log("Primer parque:", data.data[0]);
      })
-     .catch(e => console.error('❌ Error CORS:', e));
+     .catch((e) => console.error("❌ Error CORS:", e));
    ```
 
 ### 📊 Troubleshooting Producción
@@ -331,6 +335,7 @@ CORS Origin: https://dagma-360-capture-frontend.vercel.app
 #### Si no se ven los parques en producción:
 
 1. **Verificar variable de entorno en Vercel:**
+
    ```bash
    # En Vercel Dashboard > tu proyecto > Settings > Environment Variables
    # Debe tener:
@@ -338,9 +343,10 @@ CORS Origin: https://dagma-360-capture-frontend.vercel.app
    ```
 
 2. **Verificar CORS desde consola del navegador:**
+
    ```javascript
    // En https://dagma-360-capture-frontend.vercel.app
-   console.log('API URL:', import.meta.env.VITE_API_URL);
+   console.log("API URL:", import.meta.env.VITE_API_URL);
    ```
 
 3. **Ver errores de red en DevTools:**
@@ -390,9 +396,9 @@ git push origin master
 
 ## 🎯 Resumen de URLs
 
-| Entorno | Frontend | Backend |
-|---------|----------|---------|
-| **Desarrollo** | `http://localhost:5174` | `/api` (proxy) o Railway |
+| Entorno        | Frontend                                        | Backend                                       |
+| -------------- | ----------------------------------------------- | --------------------------------------------- |
+| **Desarrollo** | `http://localhost:5174`                         | `/api` (proxy) o Railway                      |
 | **Producción** | `https://dagma-360-capture-frontend.vercel.app` | `https://web-production-2d737.up.railway.app` |
 
 ---
@@ -409,8 +415,6 @@ curl -I -X OPTIONS \
   -H "Access-Control-Request-Method: GET" \
   https://web-production-2d737.up.railway.app/init/parques
 ```
-
-
 
 - 🎨 Opción A: Configurar proxy local (más rápido, sin esperar despliegue)
 - 🌍 Opción B: Esperar despliegue en Railway (más simple)
