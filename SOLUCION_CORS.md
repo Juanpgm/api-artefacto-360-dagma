@@ -67,16 +67,20 @@ copy a:\programing_workspace\api-artefacto-360-dagma\vite.config.example.js vite
 ### 2. Actualizar tu código para usar el proxy:
 
 **Antes:**
+
 ```javascript
 const API_URL = "https://web-production-2d737.up.railway.app";
-fetch(`${API_URL}/init/parques`)
+fetch(`${API_URL}/init/parques`);
 ```
 
 **Después:**
+
 ```javascript
 // En desarrollo, usa /api que será proxy a Railway
-const API_URL = import.meta.env.DEV ? '/api' : 'https://web-production-2d737.up.railway.app';
-fetch(`${API_URL}/init/parques`)
+const API_URL = import.meta.env.DEV
+  ? "/api"
+  : "https://web-production-2d737.up.railway.app";
+fetch(`${API_URL}/init/parques`);
 ```
 
 ### 3. Reiniciar servidor:
@@ -87,6 +91,7 @@ npm run dev
 ```
 
 ### ✅ Ventajas del Proxy:
+
 - ✅ No hay problemas de CORS en desarrollo
 - ✅ Las peticiones pasan por localhost
 - ✅ Mejor para debugging
@@ -109,6 +114,7 @@ python test_api_connection.py
 ```
 
 Debe mostrar:
+
 ```
 ✅ CORS Preflight (OPTIONS): PASS
 ✅ Access-Control-Allow-Origin: http://localhost:5174
@@ -129,11 +135,13 @@ Ctrl + Shift + N
 ## 🧪 Verificar que funciona
 
 ### Test desde Python:
+
 ```bash
 python test_api_connection.py
 ```
 
 Espera ver:
+
 ```
 ✅ API Endpoint (GET): PASS
 ✅ CORS Preflight (OPTIONS): PASS
@@ -145,10 +153,10 @@ Espera ver:
 Abre DevTools (F12) en el navegador y ejecuta:
 
 ```javascript
-fetch('https://web-production-2d737.up.railway.app/init/parques')
-  .then(r => r.json())
-  .then(data => console.log('✅ Parques:', data.count))
-  .catch(e => console.error('❌ Error:', e))
+fetch("https://web-production-2d737.up.railway.app/init/parques")
+  .then((r) => r.json())
+  .then((data) => console.log("✅ Parques:", data.count))
+  .catch((e) => console.error("❌ Error:", e));
 ```
 
 ---
@@ -163,18 +171,19 @@ export default defineConfig({
   server: {
     port: 5174,
     proxy: {
-      '/api': {
-        target: 'https://web-production-2d737.up.railway.app',
+      "/api": {
+        target: "https://web-production-2d737.up.railway.app",
         changeOrigin: true,
-        rewrite: (path) => path.replace(/^\/api/, ''),
-        secure: false
-      }
-    }
-  }
-})
+        rewrite: (path) => path.replace(/^\/api/, ""),
+        secure: false,
+      },
+    },
+  },
+});
 ```
 
 **Para usarlo:**
+
 ```bash
 cd a:\programing_workspace\artefacto-360-dagma\frontend
 copy ..\api-artefacto-360-dagma\vite.config.example.js vite.config.js
@@ -246,5 +255,6 @@ python test_api_connection.py
 **Tiempo estimado:** 5-10 minutos (incluyendo despliegue de Railway)
 
 **¿Cuál opción prefieres?**
+
 - 🎨 Opción A: Configurar proxy local (más rápido, sin esperar despliegue)
 - 🌍 Opción B: Esperar despliegue en Railway (más simple)

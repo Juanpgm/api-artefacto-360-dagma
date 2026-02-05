@@ -1,6 +1,7 @@
 # 🔐 Guía de Configuración de Variables de Entorno
 
 ## 📋 Tabla de Contenidos
+
 1. [Variables del Backend (API)](#variables-del-backend-api)
 2. [Variables del Frontend (Vite/React)](#variables-del-frontend-vitereact)
 3. [Cómo Obtener las Credenciales](#cómo-obtener-las-credenciales)
@@ -11,6 +12,7 @@
 ## 🔧 Variables del Backend (API)
 
 ### 📍 Ubicación
+
 Archivo: `.env` en la raíz del proyecto (este repositorio)
 
 ### ⚙️ Variables Requeridas
@@ -22,6 +24,7 @@ FIREBASE_SERVICE_ACCOUNT_JSON={"type":"service_account","project_id":"unidad-cum
 ```
 
 **¿Cómo obtenerla?**
+
 1. Ve a [Firebase Console](https://console.firebase.google.com/)
 2. Selecciona tu proyecto: `unidad-cumplimiento-aa245`
 3. Ve a **Project Settings** ⚙️ > **Service Accounts**
@@ -31,6 +34,7 @@ FIREBASE_SERVICE_ACCOUNT_JSON={"type":"service_account","project_id":"unidad-cum
 7. Pégalo en tu `.env` como valor de `FIREBASE_SERVICE_ACCOUNT_JSON`
 
 **Ejemplo del JSON (NO USES ESTE, ES DE EJEMPLO):**
+
 ```json
 {
   "type": "service_account",
@@ -91,6 +95,7 @@ RAILWAY_ENVIRONMENT=production
 ## 🌐 Variables del Frontend (Vite/React)
 
 ### 📍 Ubicación
+
 **Archivo diferente en tu proyecto frontend:** `.env` en la raíz del proyecto Vite/React
 
 ### ⚙️ Variables Requeridas
@@ -117,6 +122,7 @@ VITE_FIREBASE_APP_ID=1:574623423766:web:f8e3a47e947fb64b25bfe9
 
 **¿Son seguras estas variables?**
 ✅ **SÍ** - Estas variables son la configuración PÚBLICA del cliente de Firebase.
+
 - Se envían al navegador del usuario
 - Son seguras de compartir públicamente
 - Firebase las protege con reglas de seguridad en el backend
@@ -131,6 +137,7 @@ VITE_FIREBASE_APP_ID=1:574623423766:web:f8e3a47e947fb64b25bfe9
 ### Firebase Service Account (Backend)
 
 1. **Ve a Firebase Console**
+
    ```
    https://console.firebase.google.com/
    ```
@@ -148,10 +155,11 @@ VITE_FIREBASE_APP_ID=1:574623423766:web:f8e3a47e947fb64b25bfe9
    - Se descargará: `unidad-cumplimiento-aa245-xxxxx.json`
 
 5. **Copia el contenido**
+
    ```bash
    # Windows PowerShell
    Get-Content unidad-cumplimiento-aa245-xxxxx.json | Set-Clipboard
-   
+
    # Linux/Mac
    cat unidad-cumplimiento-aa245-xxxxx.json | pbcopy
    ```
@@ -164,6 +172,7 @@ VITE_FIREBASE_APP_ID=1:574623423766:web:f8e3a47e947fb64b25bfe9
 ### Firebase Client Config (Frontend)
 
 **Ya las tienes:**
+
 ```javascript
 const firebaseConfig = {
   apiKey: "AIzaSyCQRFYX84gaSzWcOIsT6bGvMGNG1P0I0QI",
@@ -171,7 +180,7 @@ const firebaseConfig = {
   projectId: "unidad-cumplimiento-aa245",
   storageBucket: "unidad-cumplimiento-aa245.appspot.com",
   messagingSenderId: "574623423766",
-  appId: "1:574623423766:web:f8e3a47e947fb64b25bfe9"
+  appId: "1:574623423766:web:f8e3a47e947fb64b25bfe9",
 };
 ```
 
@@ -184,20 +193,24 @@ Estas se obtienen en Firebase Console > Project Settings > General > Your apps
 ### ✅ LO QUE DEBES HACER
 
 1. **Crear archivo .env local**
+
    ```bash
    # Copiar plantilla
    cp .env.example .env
-   
+
    # Editar con tus credenciales reales
    nano .env
    ```
 
 2. **Verificar .gitignore**
+
    ```bash
    # Verificar que .env está ignorado
    cat .gitignore | grep .env
    ```
+
    Debe contener:
+
    ```
    .env
    .venv
@@ -206,10 +219,11 @@ Estas se obtienen en Firebase Console > Project Settings > General > Your apps
    ```
 
 3. **Nunca commitear credenciales**
+
    ```bash
    # Verificar que .env no se va a subir
    git status
-   
+
    # .env NO debe aparecer en la lista
    ```
 
@@ -311,7 +325,7 @@ npm run dev
 
 ## ❓ Preguntas Frecuentes
 
-### ¿Puedo compartir las variables VITE_FIREBASE_*?
+### ¿Puedo compartir las variables VITE*FIREBASE*\*?
 
 ✅ **SÍ** - Son configuraciones públicas del cliente. Firebase las protege con reglas de seguridad.
 
