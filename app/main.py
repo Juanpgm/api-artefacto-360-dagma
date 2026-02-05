@@ -55,7 +55,15 @@ app.add_middleware(SlowAPIMiddleware)
 # Configurar CORS
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:3000", "http://localhost:3001", "https://tu-dominio-produccion.com"],  # Orígenes permitidos
+    allow_origins=[
+        "http://localhost:3000",      # React default
+        "http://localhost:3001",      # React alternate
+        "http://localhost:5173",      # Vite default
+        "http://localhost:5174",      # Vite alternate
+        "http://localhost:5175",      # Vite alternate
+        "https://web-production-2d737.up.railway.app",  # Railway production
+        "https://tu-dominio-produccion.com"  # Dominio custom
+    ],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
