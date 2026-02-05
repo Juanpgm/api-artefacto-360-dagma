@@ -27,12 +27,15 @@ El archivo `app/main.py` ya fue actualizado con:
 
 ```python
 allow_origins=[
+    # Desarrollo local
     "http://localhost:3000",      # React default
     "http://localhost:3001",      # React alternate
     "http://localhost:5173",      # Vite default
     "http://localhost:5174",      # Vite alternate ← NUEVO
     "http://localhost:5175",      # Vite alternate
-    "https://web-production-2d737.up.railway.app",
+    # Producción
+    "https://web-production-2d737.up.railway.app",  # Railway API
+    "https://dagma-360-capture-frontend.vercel.app",  # Frontend Vercel ← NUEVO
     "https://tu-dominio-produccion.com"
 ]
 ```
@@ -255,6 +258,159 @@ python test_api_connection.py
 **Tiempo estimado:** 5-10 minutos (incluyendo despliegue de Railway)
 
 **¿Cuál opción prefieres?**
+- 🎨 Opción A: Configurar proxy local (más rápido, sin esperar despliegue)
+- 🌍 Opción B: Esperar despliegue en Railway (más simple)
+
+---
+
+## 🚀 Producción en Vercel
+
+### 📍 URL de Frontend en Producción:
+```
+https://dagma-360-capture-frontend.vercel.app
+```
+
+### ✅ Configuración de CORS para Producción
+
+El backend ya está configurado para aceptar peticiones desde Vercel:
+
+```python
+allow_origins=[
+    # Desarrollo
+    "http://localhost:5173",
+    "http://localhost:5174",
+    "http://localhost:5175",
+    # Producción
+    "https://dagma-360-capture-frontend.vercel.app",  # ✅ Frontend Vercel
+    "https://web-production-2d737.up.railway.app"     # ✅ Railway API
+]
+```
+
+### 🧪 Verificar CORS en Producción
+
+```bash
+# Test desde Python con origin de Vercel
+python -c "
+import requests
+url = 'https://web-production-2d737.up.railway.app/init/parques'
+headers = {'Origin': 'https://dagma-360-capture-frontend.vercel.app'}
+r = requests.options(url, headers=headers)
+print('Status:', r.status_code)
+print('CORS Origin:', r.headers.get('Access-Control-Allow-Origin', 'No configurado'))
+"
+```
+
+Debe mostrar:
+```
+Status: 200
+CORS Origin: https://dagma-360-capture-frontend.vercel.app
+```
+
+### 🌐 Verificar en el Frontend de Producción
+
+1. **Abre tu app en Vercel:**
+   ```
+   https://dagma-360-capture-frontend.vercel.app
+   ```
+
+2. **Abre DevTools (F12) > Consola**
+
+3. **Ejecuta este test:**
+   ```javascript
+   fetch('https://web-production-2d737.up.railway.app/init/parques')
+     .then(r => r.json())
+     .then(data => {
+       console.log('✅ Parques cargados:', data.count);
+       console.log('Primer parque:', data.data[0]);
+     })
+     .catch(e => console.error('❌ Error CORS:', e));
+   ```
+
+### 📊 Troubleshooting Producción
+
+#### Si no se ven los parques en producción:
+
+1. **Verificar variable de entorno en Vercel:**
+   ```bash
+   # En Vercel Dashboard > tu proyecto > Settings > Environment Variables
+   # Debe tener:
+   VITE_API_URL=https://web-production-2d737.up.railway.app
+   ```
+
+2. **Verificar CORS desde consola del navegador:**
+   ```javascript
+   // En https://dagma-360-capture-frontend.vercel.app
+   console.log('API URL:', import.meta.env.VITE_API_URL);
+   ```
+
+3. **Ver errores de red en DevTools:**
+   - F12 > Network
+   - Filtrar por "parques"
+   - Verificar status code y headers
+
+4. **Si hay error 503 o 504:**
+   - La API en Railway puede estar dormida (cold start)
+   - Espera 10-15 segundos y recarga la página
+   - Verifica logs de Railway
+
+#### Logs de Railway:
+
+```bash
+# Accede a:
+https://railway.app/dashboard
+# > Tu proyecto > Logs
+
+# Busca:
+- "Firebase inicializado correctamente"
+- Errores de CORS
+- Errores de conexión a Firestore
+```
+
+### 🔄 Redesplegar si es necesario:
+
+```bash
+# Si cambias algo en el backend
+git add app/main.py
+git commit -m "fix: Add Vercel frontend to CORS allowed origins"
+git push origin master
+
+# Railway desplegará automáticamente en 2-3 minutos
+```
+
+### ✅ Checklist de Producción:
+
+- [ ] CORS incluye `https://dagma-360-capture-frontend.vercel.app`
+- [ ] Variable `VITE_API_URL` configurada en Vercel
+- [ ] API responde en Railway (no dormida)
+- [ ] Firebase conectado correctamente
+- [ ] No hay errores en DevTools del navegador
+- [ ] Los 25 parques se cargan en el mapa
+
+---
+
+## 🎯 Resumen de URLs
+
+| Entorno | Frontend | Backend |
+|---------|----------|---------|
+| **Desarrollo** | `http://localhost:5174` | `/api` (proxy) o Railway |
+| **Producción** | `https://dagma-360-capture-frontend.vercel.app` | `https://web-production-2d737.up.railway.app` |
+
+---
+
+## 📞 Comandos de Verificación Rápida
+
+```bash
+# Desarrollo
+python test_api_connection.py
+
+# Producción - Test CORS desde terminal
+curl -I -X OPTIONS \
+  -H "Origin: https://dagma-360-capture-frontend.vercel.app" \
+  -H "Access-Control-Request-Method: GET" \
+  https://web-production-2d737.up.railway.app/init/parques
+```
+
+
 
 - 🎨 Opción A: Configurar proxy local (más rápido, sin esperar despliegue)
 - 🌍 Opción B: Esperar despliegue en Railway (más simple)
