@@ -6,13 +6,31 @@ from typing import List, Optional
 from datetime import datetime
 import json
 import uuid
+import math
 from pydantic import BaseModel, Field
 
-# TODO: Importar configuración de Firebase y S3/Storage
-# from app.firebase_config import db
+# Importar configuración de Firebase y S3/Storage
+from app.firebase_config import db
 # import boto3
 
 router = APIRouter(tags=["Artefacto de Captura DAGMA"])
+
+
+# ==================== FUNCIONES AUXILIARES ====================#
+def clean_nan_values(obj):
+    """
+    Limpia valores NaN, infinitos y otros valores no compatibles con JSON
+    """
+    if isinstance(obj, dict):
+        return {key: clean_nan_values(value) for key, value in obj.items()}
+    elif isinstance(obj, list):
+        return [clean_nan_values(item) for item in obj]
+    elif isinstance(obj, float):
+        if math.isnan(obj) or math.isinf(obj):
+            return None
+        return obj
+    else:
+        return obj
 
 
 # ==================== MODELOS ====================#
@@ -51,12 +69,20 @@ async def get_init_parques():
     Obtener datos iniciales de parques para DAGMA
     """
     try:
-        # TODO: Implementar conexión a Firebase
-        # parques_ref = db.collection('parques')
-        # docs = parques_ref.stream()
+        # Obtener datos de la colección 'parques' en Firebase
+        parques_ref = db.collection('parques')
+        docs = parques_ref.stream()
         
-        # Respuesta temporal de ejemplo
+        # Convertir los documentos a lista de diccionarios
         parques = []
+        for doc in docs:
+            parque_data = doc.to_dict()
+            parque_data['id'] = doc.id  # Agregar el ID del documento
+            
+            # Limpiar valores NaN e infinitos
+            parque_data = clean_nan_values(parque_data)
+            
+            parques.append(parque_data)
         
         return {
             "success": True,
