@@ -2,7 +2,7 @@
 Rutas de Firebase - Status y gestión de colecciones
 """
 from fastapi import APIRouter, HTTPException
-from datetime import datetime
+from datetime import datetime, timezone
 from app.firebase_config import db
 
 router = APIRouter(tags=["Firebase"])
@@ -22,7 +22,7 @@ async def firebase_status():
             "storage": "available",  # TODO: Verificar storage si es necesario
             "project_id": "dagma-85aad",
             "collections_count": len(collection_names),
-            "timestamp": datetime.utcnow().isoformat()
+            "timestamp": datetime.now(timezone.utc).isoformat()
         }
     except Exception as e:
         raise HTTPException(status_code=503, detail=f"Firebase no disponible: {str(e)}")
@@ -46,7 +46,7 @@ async def get_firebase_collections():
         return {
             "success": True,
             "collections": collections_info,
-            "timestamp": datetime.utcnow().isoformat()
+            "timestamp": datetime.now(timezone.utc).isoformat()
         }
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error obteniendo colecciones: {str(e)}")
@@ -69,7 +69,7 @@ async def get_firebase_collections_summary():
             "total_collections": total_collections,
             "total_documents": total_documents,
             "total_size_mb": 0.0,  # TODO: Calcular tamaño total
-            "timestamp": datetime.utcnow().isoformat()
+            "timestamp": datetime.now(timezone.utc).isoformat()
         }
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error obteniendo resumen: {str(e)}")

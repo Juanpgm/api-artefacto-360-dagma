@@ -5,7 +5,7 @@ from fastapi import APIRouter, HTTPException, Depends, Form, Request
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from pydantic import BaseModel, EmailStr
 from typing import Optional, List
-from datetime import datetime
+from datetime import datetime, timezone
 import logging
 from app.firebase_config import auth_client, db
 from slowapi import Limiter
@@ -68,7 +68,7 @@ async def validate_session(credentials: HTTPAuthorizationCredentials = Depends(s
                 "email_verified": user.email_verified,
                 "disabled": user.disabled
             },
-            "timestamp": datetime.utcnow().isoformat()
+            "timestamp": datetime.now(timezone.utc).isoformat()
         }
     except Exception as e:
         raise HTTPException(status_code=401, detail="Token inválido")
@@ -104,7 +104,7 @@ async def login_user(credentials: UserLoginRequest, request: Request):
                 "full_name": user.display_name,
                 "email_verified": user.email_verified
             },
-            "timestamp": datetime.utcnow().isoformat()
+            "timestamp": datetime.now(timezone.utc).isoformat()
         }
     except Exception as e:
         logging.warning(f"Intento de login fallido: {str(e)}")
@@ -121,7 +121,7 @@ async def register_health_check():
     return {
         "firebase_auth": "available",
         "firestore": "available",
-        "timestamp": datetime.utcnow().isoformat()
+        "timestamp": datetime.now(timezone.utc).isoformat()
     }
 
 @router.post("/auth/register")
@@ -146,7 +146,7 @@ async def register_user(user_data: UserRegistrationRequest, request: Request):
             'full_name': user_data.full_name,
             'cellphone': user_data.cellphone,
             'nombre_centro_gestor': user_data.nombre_centro_gestor,
-            'created_at': datetime.utcnow(),
+            'created_at': datetime.now(timezone.utc),
             'uid': user.uid
         })
         
@@ -155,7 +155,7 @@ async def register_user(user_data: UserRegistrationRequest, request: Request):
             "success": True,
             "message": "Usuario registrado exitosamente",
             "uid": user.uid,
-            "timestamp": datetime.utcnow().isoformat()
+            "timestamp": datetime.now(timezone.utc).isoformat()
         }
     except Exception as e:
         raise HTTPException(status_code=400, detail=str(e))
@@ -175,7 +175,7 @@ async def change_password(
         return {
             "success": True,
             "message": "Contraseña actualizada exitosamente",
-            "timestamp": datetime.utcnow().isoformat()
+            "timestamp": datetime.now(timezone.utc).isoformat()
         }
     except Exception as e:
         raise HTTPException(status_code=400, detail=str(e))
@@ -188,7 +188,7 @@ async def get_workload_identity_status():
     return {
         "workload_identity": "configured",
         "status": "active",
-        "timestamp": datetime.utcnow().isoformat()
+        "timestamp": datetime.now(timezone.utc).isoformat()
     }
 
 @router.post("/auth/google")
@@ -227,7 +227,7 @@ async def google_auth_unified(google_token: str = Form(..., description="ID Toke
                 "uid": user.uid,
                 "full_name": user.display_name
             },
-            "timestamp": datetime.utcnow().isoformat()
+            "timestamp": datetime.now(timezone.utc).isoformat()
         }
     except Exception as e:
         raise HTTPException(status_code=401, detail=str(e))
@@ -249,7 +249,7 @@ async def delete_user(uid: str, permanent: bool = False):
             "success": True,
             "message": f"Usuario {uid} eliminado",
             "permanent": permanent,
-            "timestamp": datetime.utcnow().isoformat()
+            "timestamp": datetime.now(timezone.utc).isoformat()
         }
     except Exception as e:
         raise HTTPException(status_code=400, detail=str(e))
@@ -269,7 +269,7 @@ async def list_system_users(limit: Optional[int] = 50):
             "data": [],
             "count": 0,
             "limit": limit,
-            "timestamp": datetime.utcnow().isoformat()
+            "timestamp": datetime.now(timezone.utc).isoformat()
         }
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
@@ -365,7 +365,7 @@ async def get_system_stats():
     Requiere permiso: manage:users
     """
     # TODO: Implementar estadísticas
-    return {"total_users": 0, "total_roles": 0, "timestamp": datetime.utcnow().isoformat()}
+    return {"total_users": 0, "total_roles": 0, "timestamp": datetime.now(timezone.utc).isoformat()}
 
 @router.get("/auth/config", dependencies=[Depends(security)])
 async def get_firebase_config(credentials: HTTPAuthorizationCredentials = Depends(security)):

@@ -2,7 +2,7 @@
 Rutas generales - Health checks y endpoints de utilidad
 """
 from fastapi import APIRouter
-from datetime import datetime
+from datetime import datetime, timezone
 import platform
 import os
 
@@ -16,7 +16,7 @@ async def ping():
     return {
         "status": "ok",
         "message": "¡Pong! 🏓",
-        "timestamp": datetime.utcnow().isoformat(),
+        "timestamp": datetime.now(timezone.utc).isoformat(),
         "utf8_test": "Funciona correctamente con caracteres especiales: á é í ó ú ñ"
     }
 
@@ -28,7 +28,7 @@ async def cors_test():
     return {
         "cors": "enabled",
         "message": "CORS configurado correctamente",
-        "timestamp": datetime.utcnow().isoformat()
+        "timestamp": datetime.now(timezone.utc).isoformat()
     }
 
 @router.options("/cors-test")
@@ -59,7 +59,7 @@ async def railway_debug():
         "platform": platform.system(),
         "python_version": platform.python_version(),
         "environment": os.environ.get("RAILWAY_ENVIRONMENT", "local"),
-        "timestamp": datetime.utcnow().isoformat()
+        "timestamp": datetime.now(timezone.utc).isoformat()
     }
 
 @router.get("/health")
@@ -71,7 +71,7 @@ async def health_check():
     """
     return {
         "status": "healthy",
-        "timestamp": datetime.utcnow().isoformat(),
+        "timestamp": datetime.now(timezone.utc).isoformat(),
         "service": "API Artefacto 360 DAGMA",
         "version": "1.0.0",
         "uptime": "OK",

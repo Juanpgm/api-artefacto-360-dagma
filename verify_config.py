@@ -38,6 +38,11 @@ def check_firebase_config():
         print("❌ FIREBASE_SERVICE_ACCOUNT_JSON no está configurada")
         print("💡 Debes agregar el Service Account JSON en tu .env")
         print("   Ver: CONFIGURACION_VARIABLES_ENTORNO.md")
+        print("\n📝 Para Railway/Heroku:")
+        print("   1. Descarga el JSON desde Firebase Console")
+        print("   2. Comprime a una línea: .\prepare_firebase_json.ps1 -InputFile 'archivo.json'")
+        print("   3. Agrega como variable de entorno FIREBASE_SERVICE_ACCOUNT_JSON")
+        print("   4. Ver guía completa: SOLUCION_FIREBASE_RAILWAY.md")
         return False
     
     # Verificar que es un JSON válido
@@ -58,15 +63,38 @@ def check_firebase_config():
         missing = [field for field in required_fields if field not in config]
         
         if missing:
-            print(f"⚠️  Faltan campos: {', '.join(missing)}")
+            print(f"⚠️  Campos faltantes: {', '.join(missing)}")
+            print("💡 Verifica que el JSON sea del Firebase Service Account completo")
             return False
+        
+        # Verificar formato de private_key
+        private_key = config.get('private_key', '')
+        if not private_key.startswith('-----BEGIN PRIVATE KEY-----'):
+            print("⚠️  WARNING: private_key no tiene el formato esperado")
+            print("   Debe empezar con: -----BEGIN PRIVATE KEY-----")
         else:
-            print("✅ Todos los campos requeridos presentes")
-            return True
-            
+            print("✅ Formato de private_key correcto")
+        
+        # Verificar que el JSON no tenga espacios extra o saltos de línea problemáticos
+        json_length = len(service_account_json)
+        print(f"📊 Tamaño del JSON: {json_length} caracteres")
+        
+        if json_length < 1000:
+            print("⚠️  WARNING: El JSON parece demasiado pequeño")
+            print("   Un Firebase Service Account JSON típico tiene ~2500+ caracteres")
+        
+        return True
+        
     except json.JSONDecodeError as e:
-        print(f"❌ Error: El JSON no es válido")
-        print(f"   {str(e)}")
+        print("❌ FIREBASE_SERVICE_ACCOUNT_JSON no es un JSON válido")
+        print(f"   Error: {e}")
+        print("\n💡 Pasos para corregir:")
+        print("   1. Verifica que el JSON no tenga saltos de línea extra")
+        print("   2. Usa el script: .\prepare_firebase_json.ps1 -InputFile 'tu-archivo.json'")
+        print("   3. Copia el resultado comprimido")
+        return False
+    except Exception as e:
+        print(f"❌ Error inesperado: {e}")
         return False
 
 def check_gitignore():

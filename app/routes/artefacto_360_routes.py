@@ -3,7 +3,7 @@ Rutas para gestión de Artefacto de Captura DAGMA
 """
 from fastapi import APIRouter, HTTPException, Form, UploadFile, File, Query
 from typing import List, Optional
-from datetime import datetime
+from datetime import datetime, timezone
 import json
 import uuid
 import math
@@ -166,7 +166,7 @@ async def get_init_parques():
             "success": True,
             "data": parques,
             "count": len(parques),
-            "timestamp": datetime.utcnow().isoformat()
+            "timestamp": datetime.now(timezone.utc).isoformat()
         }
     except Exception as e:
         raise HTTPException(
@@ -333,7 +333,7 @@ async def post_reconocimiento(
         
         for i, photo in enumerate(photos):
             # Generar nombre único para la foto
-            timestamp = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
+            timestamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
             # Sanitizar el nombre del archivo
             safe_filename = "".join(c for c in photo.filename if c.isalnum() or c in "._-")
             photo_filename = f"{timestamp}_{i}_{safe_filename}"
@@ -386,8 +386,8 @@ async def post_reconocimiento(
             "coordinates": geometry,
             "photosUrl": photos_urls,
             "photos_uploaded": len(photos_urls),
-            "created_at": datetime.utcnow().isoformat(),
-            "timestamp": datetime.utcnow().isoformat()
+            "created_at": datetime.now(timezone.utc).isoformat(),
+            "timestamp": datetime.now(timezone.utc).isoformat()
         }
         
         # Guardar en Firebase
@@ -416,7 +416,7 @@ async def post_reconocimiento(
             coordinates=geometry,
             photosUrl=photos_urls,
             photos_uploaded=len(photos_urls),
-            timestamp=datetime.utcnow().isoformat()
+            timestamp=datetime.now(timezone.utc).isoformat()
         )
         
     except HTTPException:
@@ -466,7 +466,7 @@ async def get_reportes():
             "success": True,
             "data": reportes,
             "count": len(reportes),
-            "timestamp": datetime.utcnow().isoformat()
+            "timestamp": datetime.now(timezone.utc).isoformat()
         }
     except Exception as e:
         raise HTTPException(
@@ -541,7 +541,7 @@ async def delete_reporte(
             "id": reporte_id,
             "message": "Reporte y fotos eliminados exitosamente",
             "photos_deleted": photos_deleted,
-            "timestamp": datetime.utcnow().isoformat()
+            "timestamp": datetime.now(timezone.utc).isoformat()
         }
         
     except Exception as e:
