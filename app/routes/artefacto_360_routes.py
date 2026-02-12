@@ -13,6 +13,7 @@ from pydantic import BaseModel, Field
 
 # Importar configuración de Firebase y S3/Storage
 from app.firebase_config import db
+from firebase_admin import firestore
 import boto3
 from botocore.exceptions import ClientError
 
@@ -428,39 +429,103 @@ async def post_reconocimiento(
         )
 
 
-# ==================== ENDPOINT 3: Obtener Reportes ====================#
+# ==================== ENDPOINT 3: Estadísticas (KPIs) ====================#
 @router.get(
-    "/grupo-operativo/reportes",
-    summary="🔵 GET | Obtener Reportes",
+    "/grupo-operativo/stats",
+    summary="🔵 GET | Estadísticas del Dashboard",
     description="""
-## 🔵 GET | Obtener Reportes del Grupo Operativo
+## 🔵 GET | Estadísticas del Dashboard (KPIs)
 
-**Propósito**: Consultar todos los reportes registrados por el grupo operativo.
+**Propósito**: Obtener métricas resumidas de la actividad del usuario para mostrar en el Dashboard.
 
 ### ✅ Respuesta
-Retorna lista de reportes con sus detalles.
+Retorna estadísticas de visitas del mes actual, pendientes y parques visitados.
 
 ### 📝 Ejemplo de uso:
 ```javascript
-const response = await fetch('/grupo-operativo/reportes');
+const response = await fetch('/grupo-operativo/stats');
+const stats = await response.json();
+// stats.data = { total_visitas_mes: 12, total_pendientes: 5, parques_visitados: 8 }
+```
+    """
+)
+async def get_stats():
+    """
+    Obtener estadísticas resumidas del grupo operativo para Dashboard
+    """
+    try:
+        # Obtener fecha del mes actual
+        now = datetime.now(timezone.utc)
+        start_of_month = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+        
+        # Consultar reportes del mes actual
+        reportes_ref = db.collection('reconocimientos_dagma')
+        docs = reportes_ref.where('created_at', '>=', start_of_month.isoformat()).stream()
+        
+        reportes_mes = []
+        parques_visitados = set()
+        
+        for doc in docs:
+            data = doc.to_dict()
+            reportes_mes.append(data)
+            # Agregar dirección como identificador de parque visitado
+            if 'direccion' in data:
+                parques_visitados.add(data['direccion'])
+        
+        # TODO: Implementar lógica de pendientes según el modelo de negocio
+        # Por ahora retornamos 0
+        total_pendientes = 0
+        
+        return {
+            "success": True,
+            "data": {
+                "total_visitas_mes": len(reportes_mes),
+                "total_pendientes": total_pendientes,
+                "parques_visitados": len(parques_visitados)
+            },
+            "timestamp": datetime.now(timezone.utc).isoformat()
+        }
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Error obteniendo estadísticas: {str(e)}"
+        )
+
+
+# ==================== ENDPOINT 4: Actividad Reciente ====================#
+@router.get(
+    "/grupo-operativo/reportes/recent",
+    summary="🔵 GET | Actividad Reciente",
+    description="""
+## 🔵 GET | Obtener Reportes Recientes
+
+**Propósito**: Obtener los últimos N reportes para el widget de "Actividad Reciente" del Dashboard.
+
+### 📥 Parámetros
+- **limit** (opcional): Cantidad de reportes a retornar (default: 3, máximo: 10)
+
+### 📝 Ejemplo de uso:
+```javascript
+const response = await fetch('/grupo-operativo/reportes/recent?limit=5');
 const reportes = await response.json();
 ```
     """
 )
-async def get_reportes():
+async def get_reportes_recent(
+    limit: int = Query(default=3, ge=1, le=10, description="Cantidad de reportes recientes a retornar")
+):
     """
-    Obtener todos los reportes del grupo operativo
+    Obtener los últimos N reportes ordenados por fecha descendente
     """
     try:
-        # TODO: Implementar conexión a Firebase
-        # reportes_ref = db.collection('reconocimientos_dagma')
-        # docs = reportes_ref.order_by('created_at', direction='DESCENDING').stream()
+        reportes_ref = db.collection('reconocimientos_dagma')
+        docs = reportes_ref.order_by('created_at', direction=firestore.Query.DESCENDING).limit(limit).stream()
         
         reportes = []
-        # for doc in docs:
-        #     data = doc.to_dict()
-        #     data['id'] = doc.id
-        #     reportes.append(data)
+        for doc in docs:
+            data = doc.to_dict()
+            data['id'] = doc.id
+            reportes.append(data)
         
         return {
             "success": True,
@@ -471,11 +536,146 @@ async def get_reportes():
     except Exception as e:
         raise HTTPException(
             status_code=500,
+            detail=f"Error obteniendo reportes recientes: {str(e)}"
+        )
+
+
+# ==================== ENDPOINT 5: Obtener Reportes con Filtros ====================#
+@router.get(
+    "/grupo-operativo/reportes",
+    summary="🔵 GET | Obtener Reportes (con filtros)",
+    description="""
+## 🔵 GET | Obtener Reportes del Grupo Operativo
+
+**Propósito**: Consultar reportes con filtros opcionales y paginación.
+
+### 📥 Parámetros de Filtrado
+- **year** (opcional): Filtrar por año (ej: 2024)
+- **month** (opcional): Filtrar por mes (1-12)
+- **search** (opcional): Búsqueda parcial en dirección, descripción o tipo de intervención
+- **type** (opcional): Filtrar por tipo de intervención exacto
+- **page** (opcional): Número de página (default: 1)
+- **limit** (opcional): Resultados por página (default: 20, máximo: 100)
+
+### ✅ Respuesta
+Retorna lista de reportes filtrados con metadatos de paginación.
+
+### 📝 Ejemplos de uso:
+```javascript
+// Todos los reportes
+fetch('/grupo-operativo/reportes');
+
+// Reportes de enero 2024
+fetch('/grupo-operativo/reportes?year=2024&month=1');
+
+// Buscar por parque
+fetch('/grupo-operativo/reportes?search=Parque San Antonio');
+
+// Filtrar por tipo
+fetch('/grupo-operativo/reportes?type=Mantenimiento');
+
+// Con paginación
+fetch('/grupo-operativo/reportes?page=2&limit=10');
+```
+    """
+)
+async def get_reportes(
+    year: Optional[int] = Query(None, ge=2020, le=2100, description="Filtrar por año"),
+    month: Optional[int] = Query(None, ge=1, le=12, description="Filtrar por mes (1-12)"),
+    search: Optional[str] = Query(None, min_length=1, description="Búsqueda parcial en dirección/descripción/tipo"),
+    type: Optional[str] = Query(None, min_length=1, description="Filtrar por tipo de intervención"),
+    page: int = Query(default=1, ge=1, description="Número de página"),
+    limit: int = Query(default=20, ge=1, le=100, description="Resultados por página")
+):
+    """
+    Obtener reportes del grupo operativo con filtros opcionales y paginación
+    """
+    try:
+        reportes_ref = db.collection('reconocimientos_dagma')
+        query = reportes_ref
+        
+        # Aplicar filtro de fecha (año y mes)
+        if year and month:
+            # Crear rango de fechas para el mes específico
+            start_date = datetime(year, month, 1, tzinfo=timezone.utc)
+            if month == 12:
+                end_date = datetime(year + 1, 1, 1, tzinfo=timezone.utc)
+            else:
+                end_date = datetime(year, month + 1, 1, tzinfo=timezone.utc)
+            
+            query = query.where('created_at', '>=', start_date.isoformat())
+            query = query.where('created_at', '<', end_date.isoformat())
+        elif year:
+            # Solo año
+            start_date = datetime(year, 1, 1, tzinfo=timezone.utc)
+            end_date = datetime(year + 1, 1, 1, tzinfo=timezone.utc)
+            query = query.where('created_at', '>=', start_date.isoformat())
+            query = query.where('created_at', '<', end_date.isoformat())
+        
+        # Aplicar filtro de tipo de intervención (exacto)
+        if type:
+            query = query.where('tipo_intervencion', '==', type)
+        
+        # Ordenar por fecha descendente
+        query = query.order_by('created_at', direction=firestore.Query.DESCENDING)
+        
+        # Obtener todos los documentos que cumplen los filtros
+        docs = query.stream()
+        
+        all_reportes = []
+        for doc in docs:
+            data = doc.to_dict()
+            data['id'] = doc.id
+            
+            # Aplicar filtro de búsqueda en memoria (Firebase no soporta búsqueda parcial de texto)
+            if search:
+                search_lower = search.lower()
+                searchable_text = (
+                    data.get('direccion', '').lower() + ' ' +
+                    data.get('descripcion_intervencion', '').lower() + ' ' +
+                    data.get('tipo_intervencion', '').lower()
+                )
+                if search_lower not in searchable_text:
+                    continue
+            
+            all_reportes.append(data)
+        
+        # Calcular paginación
+        total_items = len(all_reportes)
+        total_pages = math.ceil(total_items / limit)
+        start_index = (page - 1) * limit
+        end_index = start_index + limit
+        
+        # Obtener página actual
+        paginated_reportes = all_reportes[start_index:end_index]
+        
+        return {
+            "success": True,
+            "data": paginated_reportes,
+            "pagination": {
+                "page": page,
+                "limit": limit,
+                "total_items": total_items,
+                "total_pages": total_pages,
+                "has_next": page < total_pages,
+                "has_prev": page > 1
+            },
+            "filters": {
+                "year": year,
+                "month": month,
+                "search": search,
+                "type": type
+            },
+            "timestamp": datetime.now(timezone.utc).isoformat()
+        }
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
             detail=f"Error obteniendo reportes: {str(e)}"
         )
 
 
-# ==================== ENDPOINT 4: Eliminar Reporte ====================#
+# ==================== ENDPOINT 6: Eliminar Reporte ====================#
 @router.delete(
     "/grupo-operativo/eliminar-reporte",
     summary="🔴 DELETE | Eliminar Reporte",
