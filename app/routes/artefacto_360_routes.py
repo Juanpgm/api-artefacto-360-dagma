@@ -118,6 +118,7 @@ class ReconocimientoResponse(BaseModel):
     success: bool
     id: Optional[str] = None
     message: str
+    nombre_parque: Optional[str] = None
     coordinates: Optional[dict] = None
     photosUrl: Optional[List[str]] = None
     photos_uploaded: Optional[int] = None
@@ -190,6 +191,7 @@ incluyendo captura de coordenadas GPS y subida de fotos a Amazon S3.
 - **tipo_intervencion**: Tipo de intervención realizada
 - **descripcion_intervencion**: Descripción detallada de la intervención
 - **direccion**: Dirección del lugar intervenido
+- **nombre_parque**: Nombre del parque asociado (heredado de la colección 'parques')
 - **observaciones**: Observaciones adicionales (opcional)
 - **coordinates_type**: Tipo de geometría (Point, LineString, Polygon)
 - **coordinates_data**: Coordenadas GPS en formato JSON array
@@ -216,6 +218,7 @@ const formData = new FormData();
 formData.append('tipo_intervencion', 'Mantenimiento');
 formData.append('descripcion_intervencion', 'Poda de árboles');
 formData.append('direccion', 'Calle 5 #10-20');
+formData.append('nombre_parque', 'Parque del Ingenio');
 formData.append('observaciones', 'Trabajo completado satisfactoriamente');
 formData.append('coordinates_type', 'Point');
 formData.append('coordinates_data', '[-76.5225, 3.4516]');
@@ -255,6 +258,7 @@ async def post_reconocimiento(
     tipo_intervencion: str = Form(..., min_length=1, description="Tipo de intervención"),
     descripcion_intervencion: str = Form(..., min_length=1, description="Descripción de la intervención"),
     direccion: str = Form(..., min_length=1, description="Dirección del lugar"),
+    nombre_parque: str = Form(..., min_length=1, description="Nombre del parque asociado (de la colección 'parques')"),
     coordinates_type: str = Form(..., min_length=1, description="Tipo de geometría (Point, LineString, Polygon, etc.)"),
     coordinates_data: str = Form(..., description="Coordenadas en formato JSON array. Ejemplo: [-76.5225, 3.4516]"),
     photos: List[UploadFile] = File(..., description="Lista de archivos de fotos a subir a S3"),
@@ -383,6 +387,7 @@ async def post_reconocimiento(
             "tipo_intervencion": tipo_intervencion,
             "descripcion_intervencion": descripcion_intervencion,
             "direccion": direccion,
+            "nombre_parque": nombre_parque,
             "observaciones": observaciones or "",
             "coordinates": geometry,
             "photosUrl": photos_urls,
@@ -414,6 +419,7 @@ async def post_reconocimiento(
             success=True,
             id=reconocimiento_id,
             message="Reconocimiento registrado exitosamente",
+            nombre_parque=nombre_parque,
             coordinates=geometry,
             photosUrl=photos_urls,
             photos_uploaded=len(photos_urls),
