@@ -17,7 +17,91 @@ from firebase_admin import firestore
 import boto3
 from botocore.exceptions import ClientError
 
+# Importar librerías para intersecciones geográficas
+from shapely.geometry import Point, shape
+
 router = APIRouter(tags=["Artefacto de Captura DAGMA"])
+
+# ==================== CARGAR GEOJSONS ====================#
+# Cargar los archivos GeoJSON al iniciar la aplicación
+_BASEMAPS_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), 'basemaps', 'cartografia_base')
+_COMUNAS_FILE = os.path.join(_BASEMAPS_DIR, 'comunas_corregimientos.geojson')
+_BARRIOS_FILE = os.path.join(_BASEMAPS_DIR, 'barrios_veredas.geojson')
+
+def _load_geojson_features(filepath: str) -> dict:
+    """Carga un archivo GeoJSON y retorna un diccionario con las características"""
+    try:
+        with open(filepath, 'r', encoding='utf-8') as f:
+            geojson_data = json.load(f)
+        
+        features_dict = {}
+        if 'features' in geojson_data:
+            for feature in geojson_data['features']:
+                if 'properties' in feature and 'geometry' in feature:
+                    features_dict[len(features_dict)] = feature
+        
+        return features_dict
+    except Exception as e:
+        print(f"⚠️ Error cargando GeoJSON {filepath}: {str(e)}")
+        return {}
+
+# Cargar los datos al iniciar
+_COMUNAS_FEATURES = _load_geojson_features(_COMUNAS_FILE)
+_BARRIOS_FEATURES = _load_geojson_features(_BARRIOS_FILE)
+
+print(f"✅ Cargadas {len(_COMUNAS_FEATURES)} comunas/corregimientos")
+print(f"✅ Cargados {len(_BARRIOS_FEATURES)} barrios/veredas")
+
+
+def get_location_from_coordinates(coordinates: List) -> tuple:
+    """
+    Realiza intersecciones geográficas para encontrar la comuna/corregimiento y barrio/vereda
+    
+    Args:
+        coordinates: Array de coordenadas [lon, lat] para Point
+        
+    Returns:
+        Tupla con (comuna_corregimiento, barrio_vereda) o (None, None) si no encuentra
+    """
+    if not coordinates or len(coordinates) != 2:
+        return None, None
+    
+    try:
+        # Crear punto a partir de las coordenadas
+        point = Point(coordinates[0], coordinates[1])
+        
+        # Buscar intersección con comunas
+        comuna_corregimiento = None
+        for idx, feature in _COMUNAS_FEATURES.items():
+            try:
+                # Convertir la geometría del GeoJSON a un objeto Shapely
+                geom = shape(feature['geometry'])
+                if point.within(geom):
+                    # El punto está dentro de este polígono
+                    comuna_corregimiento = feature['properties'].get('comuna_corregimiento')
+                    break
+            except Exception as e:
+                print(f"⚠️ Error procesando comuna {idx}: {str(e)}")
+                continue
+        
+        # Buscar intersección con barrios
+        barrio_vereda = None
+        for idx, feature in _BARRIOS_FEATURES.items():
+            try:
+                geom = shape(feature['geometry'])
+                if point.within(geom):
+                    # El punto está dentro de este polígono
+                    barrio_vereda = feature['properties'].get('barrio_vereda')
+                    break
+            except Exception as e:
+                print(f"⚠️ Error procesando barrio {idx}: {str(e)}")
+                continue
+        
+        return comuna_corregimiento, barrio_vereda
+    
+    except Exception as e:
+        print(f"❌ Error en intersección geográfica: {str(e)}")
+        return None, None
 
 
 # ==================== FUNCIONES AUXILIARES ====================#
@@ -304,12 +388,36 @@ async def post_reconocimiento(
         
         # Parsear y validar coordenadas
         try:
-            coordinates = json.loads(coordinates_data)
+            print(f"📍 Recibido coordinates_data: {repr(coordinates_data)}")
+            print(f"📍 Tipo: {type(coordinates_data)}, Long: {len(coordinates_data) if coordinates_data else 0}")
+            
+            # Intentar parsear como JSON
+            coordinates_str = coordinates_data.strip()
+            
+            # Si no empieza con '[', asumir que es formato "lon,lat" y convertirlo
+            if not coordinates_str.startswith('['):
+                # Formato: -76.5225,3.4516 o -76.5225, 3.4516
+                parts = coordinates_str.split(',')
+                if len(parts) == 2:
+                    try:
+                        lon = float(parts[0].strip())
+                        lat = float(parts[1].strip())
+                        coordinates = [lon, lat]
+                        print(f"✅ Coordenadas parseadas como lon,lat: {coordinates}")
+                    except ValueError:
+                        raise json.JSONDecodeError("Formato inválido", coordinates_str, 0)
+                else:
+                    raise json.JSONDecodeError("Debe tener formato [lon,lat]", coordinates_str, 0)
+            else:
+                # Formato JSON array: [-76.5225, 3.4516]
+                coordinates = json.loads(coordinates_str)
+                
             validate_coordinates(coordinates, coordinates_type)
-        except json.JSONDecodeError:
+        except json.JSONDecodeError as e:
+            print(f"❌ Error JSON: {str(e)}")
             raise HTTPException(
                 status_code=400,
-                detail="Formato de coordenadas inválido. Debe ser un JSON array válido"
+                detail=f"Formato de coordenadas inválido. Envíe como '[lon,lat]' (ej: '[-76.5225,3.4516]') o 'lon,lat' (ej: '-76.5225,3.4516'). Recibido: '{coordinates_data}'"
             )
         except ValueError as e:
             raise HTTPException(
@@ -322,6 +430,23 @@ async def post_reconocimiento(
             "type": coordinates_type,
             "coordinates": coordinates
         }
+        
+        # Obtener ubicación geográfica (comuna/corregimiento y barrio/vereda)
+        # Solo funciona para geometría Point
+        comuna_corregimiento = None
+        barrio_vereda = None
+        
+        if coordinates_type == "Point":
+            try:
+                comuna_corregimiento, barrio_vereda = get_location_from_coordinates(coordinates)
+                if comuna_corregimiento:
+                    print(f"✅ Comuna/Corregimiento encontrada: {comuna_corregimiento}")
+                if barrio_vereda:
+                    print(f"✅ Barrio/Vereda encontrado: {barrio_vereda}")
+            except Exception as e:
+                print(f"⚠️ Error obteniendo ubicación: {str(e)}")
+        else:
+            print(f"ℹ️ La geolocalización solo es disponible para geometría Point, se capturó {coordinates_type}")
         
         # Obtener cliente S3 y bucket name
         bucket_name = os.getenv('S3_BUCKET_NAME', '360-dagma-photos')
@@ -390,6 +515,8 @@ async def post_reconocimiento(
             "nombre_parque": nombre_parque,
             "observaciones": observaciones or "",
             "coordinates": geometry,
+            "comuna_corregimiento": comuna_corregimiento,
+            "barrio_vereda": barrio_vereda,
             "photosUrl": photos_urls,
             "photos_uploaded": len(photos_urls),
             "created_at": datetime.now(timezone.utc).isoformat(),
