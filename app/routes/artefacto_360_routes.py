@@ -808,7 +808,77 @@ async def get_reportes(
         )
 
 
-# ==================== ENDPOINT 6: Eliminar Reporte ====================#
+# ==================== ENDPOINT 6: Obtener Actividades Plan Distrito Verde ====================#
+@router.get(
+    "/actividades_plan_distrito_verde",
+    summary="🟢 GET | Obtener Actividades del Plan Distrito Verde",
+    description="""
+## 🟢 GET | Obtener Actividades del Plan Distrito Verde
+
+**Propósito**: Consultar todas las actividades registradas en el plan de intervención "Distrito Verde" desde Firebase.
+
+### ✅ Respuesta
+Retorna lista de actividades con todos los detalles del plan de intervención.
+
+### 📝 Ejemplos de uso:
+```javascript
+// Obtener todas las actividades
+fetch('/actividades_plan_distrito_verde');
+```
+
+### 📊 Estructura de datos retornados:
+```json
+{
+  "success": true,
+  "total": 5,
+  "data": [
+    {
+      "id": "doc-id",
+      "nombre": "Nombre de la actividad",
+      "descripcion": "Descripción...",
+      "ubicacion": "Lugar de ejecución",
+      ...otros campos
+    }
+  ],
+  "timestamp": "2026-02-14T10:30:00Z"
+}
+```
+    """
+)
+async def get_actividades_plan_distrito_verde():
+    """
+    Obtener todas las actividades del plan Distrito Verde de Firebase
+    """
+    try:
+        # Obtener referencia a la colección
+        plan_ref = db.collection('plan_distrito_verde')
+        
+        # Obtener todos los documentos
+        docs = plan_ref.stream()
+        
+        actividades = []
+        for doc in docs:
+            data = doc.to_dict()
+            # Agregar el ID del documento a los datos
+            data['id'] = doc.id
+            actividades.append(data)
+        
+        return {
+            "success": True,
+            "total": len(actividades),
+            "data": actividades,
+            "timestamp": datetime.now(timezone.utc).isoformat()
+        }
+        
+    except Exception as e:
+        print(f"❌ Error obteniendo actividades: {str(e)}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"Error obteniendo actividades del plan Distrito Verde: {str(e)}"
+        )
+
+
+# ==================== ENDPOINT 7: Eliminar Reporte ====================#
 @router.delete(
     "/grupo-operativo/eliminar-reporte",
     summary="🔴 DELETE | Eliminar Reporte",
