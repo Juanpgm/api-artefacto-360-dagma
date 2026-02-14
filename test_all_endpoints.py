@@ -486,7 +486,7 @@ class TestAuthRoutes:
             "password": "SecurePass123!",
             "full_name": "New User",
             "cellphone": "1234567890",
-            "nombre_centro_gestor": "Centro Test"
+            "grupo": "Centro Test"
         }
         response = client.post("/auth/register", json=register_data)
         assert response.status_code == 200
@@ -502,7 +502,7 @@ class TestAuthRoutes:
             "password": "SecurePass123!",
             "full_name": "New User",
             "cellphone": "1234567890",
-            "nombre_centro_gestor": "Centro Test"
+            "grupo": "Centro Test"
         }
         response = client.post("/auth/register", json=register_data)
         assert response.status_code == 422  # Validation error
@@ -875,7 +875,7 @@ class TestIntegration:
             "password": "SecurePass123!",
             "full_name": "Integration Test User",
             "cellphone": "9876543210",
-            "nombre_centro_gestor": "Centro Integration"
+            "grupo": "Centro Integration"
         }
         register_response = client.post("/auth/register", json=register_data)
         assert register_response.status_code == 200
