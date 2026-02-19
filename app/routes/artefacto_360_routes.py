@@ -878,7 +878,100 @@ async def get_actividades_plan_distrito_verde():
         )
 
 
-# ==================== ENDPOINT 7: Eliminar Reporte ====================#
+# ==================== ENDPOINT 8: Convocar Actividad ====================#
+
+from fastapi import Body
+
+class PuntoEncuentroModel(BaseModel):
+    geometry: dict = Field(..., description="Coordenadas tipo punto en formato RFC 7946")
+    direccion: str = Field(..., description="Dirección del punto de encuentro")
+    comunas_corregimiento: str = Field(None, description="Comuna o corregimiento (autocompletado por intersección)")
+    barrio_vereda: str = Field(None, description="Barrio o vereda (autocompletado por intersección)")
+
+class ConvocarActividadRequest(BaseModel):
+    fecha_actividad: str = Field(..., description="Fecha en formato dd/mm/aaaa")
+    hora_encuentro: str = Field(..., description="Hora en formato hh:mm")
+    grupos_requeridos: list[str] = Field(..., description="Lista de grupos requeridos")
+    lider_actividad: str = Field(..., description="Líder de la actividad")
+    punto_encuentro: dict = Field(..., description="Punto de encuentro (geometry, direccion)")
+    observaciones: str = Field(None, description="Observaciones")
+    telefono: str = Field(..., description="Teléfono de contacto")
+    personas_requeridas_grupo: int = Field(..., description="Personas requeridas por grupo")
+    objetivo_actividad: str = Field(..., description="Objetivo de la actividad")
+    email: str = Field(..., description="Email de contacto")
+
+class ConvocarActividadResponse(BaseModel):
+    success: bool
+    id: str
+    message: str
+    marca_temporal: str
+    data: dict
+
+@router.post(
+    "/convocar_actividad",
+    summary="🟢 POST | Convocar Actividad",
+    description="""
+## 🟢 POST | Convocar Actividad
+
+Registra una convocatoria de actividad con georreferenciación automática del punto de encuentro.
+
+**Tag:** Artefacto de Captura DAGMA
+""",
+    tags=["Artefacto de Captura DAGMA"],
+    response_model=ConvocarActividadResponse
+)
+async def convocar_actividad(
+    body: ConvocarActividadRequest = Body(...)
+):
+    """
+    Convoca una actividad y la registra en la base de datos, calculando comuna/corregimiento y barrio/vereda.
+    """
+    try:
+        # Validar y extraer geometry
+        punto = body.punto_encuentro
+        geometry = punto.get("geometry")
+        direccion = punto.get("direccion")
+        if not geometry or geometry.get("type") != "Point" or not geometry.get("coordinates"):
+            raise HTTPException(status_code=400, detail="geometry debe ser tipo Point y tener coordinates")
+        coordinates = geometry["coordinates"]
+        validate_coordinates(coordinates, "Point")
+        # Intersección geográfica
+        comuna_corregimiento, barrio_vereda = get_location_from_coordinates(coordinates)
+        # Actualizar punto_encuentro con resultados
+        punto["comunas_corregimiento"] = comuna_corregimiento
+        punto["barrio_vereda"] = barrio_vereda
+        # Timestamp
+        marca_temporal = datetime.now(timezone.utc).isoformat()
+        # Generar ID único
+        actividad_id = str(uuid.uuid4())
+        # Preparar datos para guardar
+        actividad_data = {
+            "id": actividad_id,
+            "marca_temporal": marca_temporal,
+            "fecha_actividad": body.fecha_actividad,
+            "hora_encuentro": body.hora_encuentro,
+            "grupos_requeridos": body.grupos_requeridos,
+            "lider_actividad": body.lider_actividad,
+            "punto_encuentro": punto,
+            "observaciones": body.observaciones or "",
+            "telefono": body.telefono,
+            "personas_requeridas_grupo": body.personas_requeridas_grupo,
+            "objetivo_actividad": body.objetivo_actividad,
+            "email": body.email
+        }
+        # Guardar en Firebase
+        db.collection("convocatorias_actividades").document(actividad_id).set(actividad_data)
+        return ConvocarActividadResponse(
+            success=True,
+            id=actividad_id,
+            message="Actividad convocada exitosamente",
+            marca_temporal=marca_temporal,
+            data=actividad_data
+        )
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error convocando actividad: {str(e)}")
 @router.delete(
     "/grupo-operativo/eliminar-reporte",
     summary="🔴 DELETE | Eliminar Reporte",
