@@ -1,9 +1,11 @@
+from google.oauth2 import service_account
+from googleapiclient.discovery import build
 """
 Rutas para gestión de Artefacto de Captura DAGMA
 """
 from fastapi import APIRouter, HTTPException, Form, UploadFile, File, Query
 from typing import List, Optional
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 import pytz
 import json
 import uuid
@@ -966,6 +968,52 @@ async def convocar_actividad(
             "objetivo_actividad": body.objetivo_actividad,
             "email": body.email
         }
+
+        # === GOOGLE CALENDAR: Crear evento ===
+        try:
+            SCOPES = ['https://www.googleapis.com/auth/calendar']
+            SERVICE_ACCOUNT_FILE = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), 'dagma-85aad-firebase-adminsdk-fbsvc-1e7612eab5.json')
+            credentials = service_account.Credentials.from_service_account_file(
+                SERVICE_ACCOUNT_FILE, scopes=SCOPES)
+            service = build('calendar', 'v3', credentials=credentials)
+            # ID del calendario (puede ser el email del calendar o el ID, si es el principal del usuario, suele ser el email de la cuenta)
+
+            # Usar el ID de calendario proporcionado por el usuario
+            calendar_id = '19c263371dc17e144c9ee0b12ac40c28339cb20c259f528d348730d98e193eb9@group.calendar.google.com'
+
+            # Parsear fecha y hora a formato RFC3339
+            fecha = body.fecha_actividad  # dd/mm/aaaa
+            hora = body.hora_encuentro   # hh:mm
+            try:
+                dt_inicio = datetime.strptime(f"{fecha} {hora}", "%d/%m/%Y %H:%M")
+                dt_inicio = tz_col.localize(dt_inicio)
+                dt_fin = dt_inicio + timedelta(hours=2)  # Duración por defecto: 2h
+            except Exception as e:
+                dt_inicio = datetime.now(tz_col)
+                dt_fin = dt_inicio + timedelta(hours=2)
+
+            event = {
+                'summary': f"Actividad DAGMA: {body.objetivo_actividad}",
+                'location': direccion,
+                'description': body.observaciones or '',
+                'start': {
+                    'dateTime': dt_inicio.isoformat(),
+                    'timeZone': 'America/Bogota',
+                },
+                'end': {
+                    'dateTime': dt_fin.isoformat(),
+                    'timeZone': 'America/Bogota',
+                },
+                'reminders': {
+                    'useDefault': True,
+                },
+            }
+            created_event = service.events().insert(calendarId=calendar_id, body=event, sendUpdates='all').execute()
+            actividad_data['calendar_event_id'] = created_event.get('id')
+            actividad_data['calendar_event_link'] = created_event.get('htmlLink')
+        except Exception as e:
+            print(f"⚠️ Error creando evento en Google Calendar: {e}")
+            actividad_data['calendar_event_error'] = str(e)
         # Guardar en Firebase
         db.collection("convocatorias_actividades").document(actividad_id).set(actividad_data)
         return ConvocarActividadResponse(
