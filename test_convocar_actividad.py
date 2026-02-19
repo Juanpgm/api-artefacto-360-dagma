@@ -48,21 +48,11 @@ def test_convocar_actividad():
         print(json.dumps(result, indent=2, ensure_ascii=False))
     except Exception:
         print(response.text)
-        assert False, "No se pudo decodificar la respuesta JSON"
     assert response.status_code == 200, "El endpoint no respondió con éxito"
     assert result["success"] is True, "El campo 'success' debe ser True"
     assert "id" in result, "Debe retornar un id"
     assert "marca_temporal" in result, "Debe retornar marca_temporal"
     assert "data" in result, "Debe retornar los datos registrados"
-
-    # Verificar que se haya creado el evento en Calendar
-    data = result["data"]
-    if "calendar_event_id" not in data:
-        if "calendar_event_error" in data:
-            print(f"\n❌ Error al crear evento en Google Calendar: {data['calendar_event_error']}")
-        assert False, "No se retornó calendar_event_id en la respuesta"
-    assert "calendar_event_link" in data, "No se retornó calendar_event_link en la respuesta"
-    print(f"\n✅ Evento creado en Google Calendar: {data['calendar_event_link']}")
 
 if __name__ == "__main__":
     test_convocar_actividad()

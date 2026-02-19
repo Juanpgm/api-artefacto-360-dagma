@@ -1,11 +1,12 @@
 from google.oauth2 import service_account
 from googleapiclient.discovery import build
+from datetime import timedelta
 """
 Rutas para gestión de Artefacto de Captura DAGMA
 """
 from fastapi import APIRouter, HTTPException, Form, UploadFile, File, Query
 from typing import List, Optional
-from datetime import datetime, timezone, timedelta
+from datetime import datetime, timezone
 import pytz
 import json
 import uuid
@@ -968,19 +969,14 @@ async def convocar_actividad(
             "objetivo_actividad": body.objetivo_actividad,
             "email": body.email
         }
-
-        # === GOOGLE CALENDAR: Crear evento ===
+        # Crear evento simple en Google Calendar (sin invitados)
         try:
             SCOPES = ['https://www.googleapis.com/auth/calendar']
             SERVICE_ACCOUNT_FILE = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), 'dagma-85aad-firebase-adminsdk-fbsvc-1e7612eab5.json')
             credentials = service_account.Credentials.from_service_account_file(
                 SERVICE_ACCOUNT_FILE, scopes=SCOPES)
             service = build('calendar', 'v3', credentials=credentials)
-            # ID del calendario (puede ser el email del calendar o el ID, si es el principal del usuario, suele ser el email de la cuenta)
-
-            # Usar el ID de calendario proporcionado por el usuario
             calendar_id = '19c263371dc17e144c9ee0b12ac40c28339cb20c259f528d348730d98e193eb9@group.calendar.google.com'
-
             # Parsear fecha y hora a formato RFC3339
             fecha = body.fecha_actividad  # dd/mm/aaaa
             hora = body.hora_encuentro   # hh:mm
@@ -991,7 +987,6 @@ async def convocar_actividad(
             except Exception as e:
                 dt_inicio = datetime.now(tz_col)
                 dt_fin = dt_inicio + timedelta(hours=2)
-
             event = {
                 'summary': f"Actividad DAGMA: {body.objetivo_actividad}",
                 'location': direccion,
@@ -1008,7 +1003,7 @@ async def convocar_actividad(
                     'useDefault': True,
                 },
             }
-            created_event = service.events().insert(calendarId=calendar_id, body=event, sendUpdates='all').execute()
+            created_event = service.events().insert(calendarId=calendar_id, body=event).execute()
             actividad_data['calendar_event_id'] = created_event.get('id')
             actividad_data['calendar_event_link'] = created_event.get('htmlLink')
         except Exception as e:
