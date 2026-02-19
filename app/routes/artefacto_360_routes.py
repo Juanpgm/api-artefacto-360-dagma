@@ -4,6 +4,7 @@ Rutas para gestión de Artefacto de Captura DAGMA
 from fastapi import APIRouter, HTTPException, Form, UploadFile, File, Query
 from typing import List, Optional
 from datetime import datetime, timezone
+import pytz
 import json
 import uuid
 import math
@@ -888,6 +889,11 @@ class PuntoEncuentroModel(BaseModel):
     comunas_corregimiento: str = Field(None, description="Comuna o corregimiento (autocompletado por intersección)")
     barrio_vereda: str = Field(None, description="Barrio o vereda (autocompletado por intersección)")
 
+class PersonaRequeridaModel(BaseModel):
+    nombre_completo: str = Field(..., description="Nombre completo")
+    telefono: str = Field(..., description="Teléfono")
+    email: str = Field(..., description="Email")
+
 class ConvocarActividadRequest(BaseModel):
     fecha_actividad: str = Field(..., description="Fecha en formato dd/mm/aaaa")
     hora_encuentro: str = Field(..., description="Hora en formato hh:mm")
@@ -896,7 +902,7 @@ class ConvocarActividadRequest(BaseModel):
     punto_encuentro: dict = Field(..., description="Punto de encuentro (geometry, direccion)")
     observaciones: str = Field(None, description="Observaciones")
     telefono: str = Field(..., description="Teléfono de contacto")
-    personas_requeridas_grupo: int = Field(..., description="Personas requeridas por grupo")
+    personas_requeridas_grupo: list[PersonaRequeridaModel] = Field(..., description="Lista de personas requeridas (nombre_completo, telefono, email)")
     objetivo_actividad: str = Field(..., description="Objetivo de la actividad")
     email: str = Field(..., description="Email de contacto")
 
@@ -940,8 +946,9 @@ async def convocar_actividad(
         # Actualizar punto_encuentro con resultados
         punto["comunas_corregimiento"] = comuna_corregimiento
         punto["barrio_vereda"] = barrio_vereda
-        # Timestamp
-        marca_temporal = datetime.now(timezone.utc).isoformat()
+        # Timestamp en hora de Colombia
+        tz_col = pytz.timezone("America/Bogota")
+        marca_temporal = datetime.now(tz_col).isoformat()
         # Generar ID único
         actividad_id = str(uuid.uuid4())
         # Preparar datos para guardar
@@ -955,7 +962,7 @@ async def convocar_actividad(
             "punto_encuentro": punto,
             "observaciones": body.observaciones or "",
             "telefono": body.telefono,
-            "personas_requeridas_grupo": body.personas_requeridas_grupo,
+            "personas_requeridas_grupo": [p.dict() for p in body.personas_requeridas_grupo],
             "objetivo_actividad": body.objetivo_actividad,
             "email": body.email
         }
