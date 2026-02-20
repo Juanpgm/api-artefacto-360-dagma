@@ -16,6 +16,7 @@ def test_convocar_actividad():
         "fecha_actividad": "20/02/2026",
         "hora_encuentro": "14:30",
         "tipo_jornada": "Jornada de limpieza",
+        "duracion_actividad": 3.5,
         "grupos_requeridos": ["Grupo A", "Grupo B"],
         "lider_actividad": "Juan Pérez",
         "punto_encuentro": {
