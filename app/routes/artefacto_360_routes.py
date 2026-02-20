@@ -878,7 +878,10 @@ async def get_lideres_grupo(
     description="""
 ## 🟢 GET | Obtener Actividades del Plan Distrito Verde
 
-**Propósito**: Consultar todas las actividades registradas en el plan de intervención "Distrito Verde" desde Firebase.
+**Propósito**: Consultar actividades registradas en el plan de intervención "Distrito Verde" desde Firebase.
+
+### 📥 Parámetros
+- **id** (opcional): Filtrar por ID específico de la actividad
 
 ### ✅ Respuesta
 Retorna lista de actividades con todos los detalles del plan de intervención.
@@ -887,6 +890,9 @@ Retorna lista de actividades con todos los detalles del plan de intervención.
 ```javascript
 // Obtener todas las actividades
 fetch('/actividades_plan_distrito_verde');
+
+// Filtrar por ID específico
+fetch('/actividades_plan_distrito_verde?id=abc-123');
 ```
 
 ### 📊 Estructura de datos retornados:
@@ -908,15 +914,55 @@ fetch('/actividades_plan_distrito_verde');
 ```
     """
 )
-async def get_actividades_plan_distrito_verde():
+async def get_actividades_plan_distrito_verde(id: Optional[str] = Query(None, description="Filtrar por ID de actividad")):
     """
-    Obtener todas las actividades del plan Distrito Verde de Firebase
+    Obtener actividades del plan Distrito Verde de Firebase, opcionalmente filtradas por ID
     """
     try:
         # Obtener referencia a la colección
         plan_ref = db.collection('plan_distrito_verde')
         
-        # Obtener todos los documentos
+        # Si se proporciona un ID, filtrar por él
+        if id:
+            # Intentar primero como ID de documento
+            doc = plan_ref.document(id).get()
+            if doc.exists:
+                data = doc.to_dict()
+                data['id'] = doc.id
+                return {
+                    "success": True,
+                    "total": 1,
+                    "data": [data],
+                    "filters": {"id": id},
+                    "timestamp": datetime.now(timezone.utc).isoformat()
+                }
+            
+            # Fallback: buscar por campo interno 'id'
+            docs = plan_ref.where("id", "==", id).stream()
+            actividades = []
+            for doc in docs:
+                data = doc.to_dict()
+                data['id'] = doc.id
+                actividades.append(data)
+            
+            if not actividades:
+                return {
+                    "success": True,
+                    "total": 0,
+                    "data": [],
+                    "filters": {"id": id},
+                    "timestamp": datetime.now(timezone.utc).isoformat()
+                }
+            
+            return {
+                "success": True,
+                "total": len(actividades),
+                "data": actividades,
+                "filters": {"id": id},
+                "timestamp": datetime.now(timezone.utc).isoformat()
+            }
+        
+        # Si no hay filtro, obtener todos los documentos
         docs = plan_ref.stream()
         
         actividades = []
