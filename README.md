@@ -53,7 +53,7 @@ API para gestión de artefacto de captura DAGMA (Departamento Administrativo de 
 - `POST /auth/change-password` - Cambiar contraseña
 - `POST /auth/google` - Autenticación con Google
 - `DELETE /auth/user/{uid}` - Eliminar usuario
-- `GET /admin/users` - Listar usuarios
+- `GET /admin/users` - Listar usuarios desde Firestore (con filtros por query params)
 - `GET /auth/config` - Configuración de Firebase
 
 ## 🛠️ Instalación

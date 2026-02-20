@@ -258,21 +258,73 @@ async def delete_user(uid: str, permanent: bool = False):
 
 # Endpoints de administración
 @router.get("/admin/users")
-async def list_system_users(limit: Optional[int] = 50):
+async def list_system_users(request: Request, limit: Optional[int] = 50, offset: int = 0):
     """
     ## 📋 Listado de Usuarios desde Firestore
     
-    Lee directamente la colección "users" de Firestore y devuelve todos los usuarios registrados.
+    Lee directamente la colección "users" de Firestore y devuelve usuarios registrados,
+    permitiendo filtrar dinámicamente por cualquier campo enviado como query param.
     """
     try:
-        # TODO: Implementar consulta a Firestore
+        if limit is not None and limit < 1:
+            raise HTTPException(status_code=400, detail="El parámetro 'limit' debe ser mayor a 0")
+        if offset < 0:
+            raise HTTPException(status_code=400, detail="El parámetro 'offset' no puede ser negativo")
+
+        reserved_params = {"limit", "offset"}
+        filters = {
+            key: value.strip()
+            for key, value in request.query_params.items()
+            if key not in reserved_params and value is not None and value.strip() != ""
+        }
+
+        docs = db.collection('users').stream()
+        filtered_users = []
+
+        for doc in docs:
+            data = doc.to_dict() or {}
+
+            if 'uid' not in data or not data.get('uid'):
+                data['uid'] = doc.id
+
+            data['id'] = doc.id
+
+            matches_filters = True
+            for field_name, expected_value in filters.items():
+                current_value = data.get(field_name)
+                if current_value is None:
+                    matches_filters = False
+                    break
+
+                current_value_normalized = str(current_value).strip().lower()
+                expected_value_normalized = expected_value.lower()
+
+                if current_value_normalized != expected_value_normalized:
+                    matches_filters = False
+                    break
+
+            if matches_filters:
+                filtered_users.append(data)
+
+        total_items = len(filtered_users)
+
+        if limit is None:
+            paginated_users = filtered_users[offset:]
+        else:
+            paginated_users = filtered_users[offset:offset + limit]
+
         return {
             "success": True,
-            "data": [],
-            "count": 0,
+            "data": paginated_users,
+            "count": len(paginated_users),
+            "total_items": total_items,
             "limit": limit,
+            "offset": offset,
+            "filters": filters,
             "timestamp": datetime.now(timezone.utc).isoformat()
         }
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
