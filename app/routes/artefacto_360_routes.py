@@ -892,11 +892,6 @@ class PuntoEncuentroModel(BaseModel):
     comunas_corregimiento: str = Field(None, description="Comuna o corregimiento (autocompletado por intersección)")
     barrio_vereda: str = Field(None, description="Barrio o vereda (autocompletado por intersección)")
 
-class PersonaRequeridaModel(BaseModel):
-    nombre_completo: str = Field(..., description="Nombre completo")
-    telefono: str = Field(..., description="Teléfono")
-    email: str = Field(..., description="Email")
-
 class ConvocarActividadRequest(BaseModel):
     fecha_actividad: str = Field(..., description="Fecha en formato dd/mm/aaaa")
     hora_encuentro: str = Field(..., description="Hora en formato hh:mm")
@@ -905,7 +900,6 @@ class ConvocarActividadRequest(BaseModel):
     punto_encuentro: dict = Field(..., description="Punto de encuentro (geometry, direccion)")
     observaciones: str = Field(None, description="Observaciones")
     telefono: str = Field(..., description="Teléfono de contacto")
-    personas_requeridas_grupo: list[PersonaRequeridaModel] = Field(..., description="Lista de personas requeridas (nombre_completo, telefono, email)")
     objetivo_actividad: str = Field(..., description="Objetivo de la actividad")
     email: str = Field(..., description="Email de contacto")
 
@@ -965,16 +959,82 @@ async def convocar_actividad(
             "punto_encuentro": punto,
             "observaciones": body.observaciones or "",
             "telefono": body.telefono,
-            "personas_requeridas_grupo": [p.dict() for p in body.personas_requeridas_grupo],
             "objetivo_actividad": body.objetivo_actividad,
             "email": body.email
         }
         # Crear evento simple en Google Calendar (sin invitados)
         try:
             SCOPES = ['https://www.googleapis.com/auth/calendar']
-            SERVICE_ACCOUNT_FILE = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), 'dagma-85aad-firebase-adminsdk-fbsvc-1e7612eab5.json')
-            credentials = service_account.Credentials.from_service_account_file(
-                SERVICE_ACCOUNT_FILE, scopes=SCOPES)
+            
+            # Cargar credenciales desde múltiples fuentes (como en firebase_config.py)
+            credentials = None
+            
+            # DEBUG: Mostrar qué variables existen
+            print(f"\n[CALENDAR DEBUG] Iniciando carga de credenciales...")
+            print(f"[CALENDAR DEBUG] FIREBASE_SERVICE_ACCOUNT_JSON exists: {bool(os.getenv('FIREBASE_SERVICE_ACCOUNT_JSON'))}")
+            print(f"[CALENDAR DEBUG] GOOGLE_APPLICATION_CREDENTIALS: {os.getenv('GOOGLE_APPLICATION_CREDENTIALS')}")
+            
+            # Método 1: Usar JSON desde variable de entorno (Railway, Heroku)
+            SERVICE_ACCOUNT_JSON = os.getenv('FIREBASE_SERVICE_ACCOUNT_JSON')
+            if SERVICE_ACCOUNT_JSON:
+                print(f"[CALENDAR DEBUG] Intentando cargar desde FIREBASE_SERVICE_ACCOUNT_JSON...")
+                try:
+                    # Validar que sea JSON válido
+                    print(f"[CALENDAR DEBUG] Largura de JSON: {len(SERVICE_ACCOUNT_JSON)} caracteres")
+                    service_account_info = json.loads(SERVICE_ACCOUNT_JSON)
+                    print(f"[CALENDAR DEBUG] JSON válido. Campos: {list(service_account_info.keys())}")
+                    credentials = service_account.Credentials.from_service_account_info(
+                        service_account_info, scopes=SCOPES)
+                    print(f"[CALENDAR DEBUG] ✅ Credenciales cargadas exitosamente desde FIREBASE_SERVICE_ACCOUNT_JSON")
+                except json.JSONDecodeError as e:
+                    print(f"[CALENDAR ERROR] JSON inválido en FIREBASE_SERVICE_ACCOUNT_JSON: {e}")
+                except Exception as e:
+                    print(f"[CALENDAR ERROR] Error cargando desde FIREBASE_SERVICE_ACCOUNT_JSON: {e}")
+            else:
+                print(f"[CALENDAR DEBUG] FIREBASE_SERVICE_ACCOUNT_JSON NO está configurada")
+            
+            # Método 2: Usar ruta de archivo (GOOGLE_APPLICATION_CREDENTIALS)
+            if not credentials:
+                print(f"[CALENDAR DEBUG] Intentando cargar desde GOOGLE_APPLICATION_CREDENTIALS...")
+                GOOGLE_CREDS_PATH = os.getenv('GOOGLE_APPLICATION_CREDENTIALS')
+                if GOOGLE_CREDS_PATH and os.path.exists(GOOGLE_CREDS_PATH):
+                    try:
+                        print(f"[CALENDAR DEBUG] Archivo encontrado: {GOOGLE_CREDS_PATH}")
+                        credentials = service_account.Credentials.from_service_account_file(
+                            GOOGLE_CREDS_PATH, scopes=SCOPES)
+                        print(f"[CALENDAR DEBUG] ✅ Credenciales cargadas exitosamente desde {GOOGLE_CREDS_PATH}")
+                    except Exception as e:
+                        print(f"[CALENDAR ERROR] Error cargando desde {GOOGLE_CREDS_PATH}: {e}")
+                else:
+                    print(f"[CALENDAR DEBUG] GOOGLE_APPLICATION_CREDENTIALS no configurada o archivo no existe")
+            
+            # Método 3: Buscar archivos locales (desarrollo)
+            if not credentials:
+                print(f"[CALENDAR DEBUG] Intentando cargar desde archivos locales...")
+                possible_paths = [
+                    os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), 'dagma-85aad-firebase-adminsdk-fbsvc-1e7612eab5.json'),
+                    'dagma-85aad-firebase-adminsdk-fbsvc-1e7612eab5.json',
+                    'env/dagma-85aad-b7afe1c0f77f.json',
+                ]
+                for path in possible_paths:
+                    print(f"[CALENDAR DEBUG] Buscando: {path}")
+                    if os.path.exists(path):
+                        try:
+                            print(f"[CALENDAR DEBUG] Archivo encontrado: {path}")
+                            credentials = service_account.Credentials.from_service_account_file(
+                                path, scopes=SCOPES)
+                            print(f"[CALENDAR DEBUG] ✅ Credenciales cargadas exitosamente desde {path}")
+                            break
+                        except Exception as e:
+                            print(f"[CALENDAR ERROR] Error cargando {path}: {e}")
+                            continue
+                    else:
+                        print(f"[CALENDAR DEBUG] No encontrado: {path}")
+            
+            if not credentials:
+                error_msg = "No se encontraron credenciales para Google Calendar. Configura FIREBASE_SERVICE_ACCOUNT_JSON o GOOGLE_APPLICATION_CREDENTIALS"
+                print(f"[CALENDAR CRITICAL] {error_msg}")
+                raise ValueError(error_msg)
             service = build('calendar', 'v3', credentials=credentials)
             calendar_id = '19c263371dc17e144c9ee0b12ac40c28339cb20c259f528d348730d98e193eb9@group.calendar.google.com'
             # Parsear fecha y hora a formato RFC3339

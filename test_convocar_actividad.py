@@ -22,18 +22,6 @@ def test_convocar_actividad():
         },
         "observaciones": "Llevar herramientas",
         "telefono": "3001234567",
-        "personas_requeridas_grupo": [
-            {
-                "nombre_completo": "Carlos Gómez",
-                "telefono": "3001112233",
-                "email": "carlos.gomez@email.com"
-            },
-            {
-                "nombre_completo": "Ana Ruiz",
-                "telefono": "3002223344",
-                "email": "ana.ruiz@email.com"
-            }
-        ],
         "objetivo_actividad": "Limpieza de parque",
         "email": "juan.perez@email.com"
     }
