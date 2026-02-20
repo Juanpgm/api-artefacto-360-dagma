@@ -1217,6 +1217,109 @@ async def delete_plan_distrito_verde(actividad_id: str):
         )
 
 
+@router.put(
+    "/plan_distrito_verde/{actividad_id}",
+    summary="🟡 PUT | Actualizar Actividad Programada",
+    description="""
+## 🟡 PUT | Actualizar Actividad Programada
+
+**Propósito**: Modificar cualquier campo de un registro en la colección `plan_distrito_verde`.
+
+### 📥 Parámetros
+- **actividad_id**: ID del registro a actualizar
+- **body**: JSON con los campos a modificar (puede incluir cualquier campo)
+
+### ✅ Respuesta exitosa
+```json
+{
+  "success": true,
+  "id": "abc-123",
+  "message": "Actividad actualizada exitosamente",
+  "data": {
+    "id": "abc-123",
+    "fecha_actividad": "20/02/2026",
+    ...otros campos
+  },
+  "timestamp": "2026-02-19T..."
+}
+```
+
+### 📝 Ejemplo de uso:
+```javascript
+const response = await fetch('/plan_distrito_verde/abc-123', {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+        "estado_actividad": "En Ejecución",
+        "observaciones": "Cambio de observación"
+    })
+});
+```
+    """
+)
+async def update_plan_distrito_verde(actividad_id: str, body: dict):
+    """
+    Actualizar un registro del plan Distrito Verde con los campos especificados
+    """
+    try:
+        if not body:
+            raise HTTPException(
+                status_code=400,
+                detail="El cuerpo de la solicitud no puede estar vacío"
+            )
+
+        collection_ref = db.collection("plan_distrito_verde")
+
+        # Intentar primero por ID de documento
+        doc_ref = collection_ref.document(actividad_id)
+        doc_snapshot = doc_ref.get()
+
+        if doc_snapshot.exists:
+            doc_ref.update(body)
+            updated_doc = doc_ref.get()
+            updated_data = updated_doc.to_dict() or {}
+            updated_data['id'] = actividad_id
+            
+            return {
+                "success": True,
+                "id": actividad_id,
+                "message": "Actividad actualizada exitosamente",
+                "data": updated_data,
+                "timestamp": datetime.now(timezone.utc).isoformat()
+            }
+
+        # Fallback: buscar por campo interno 'id'
+        docs = collection_ref.where("id", "==", actividad_id).limit(1).stream()
+        matching_doc = next(docs, None)
+
+        if not matching_doc:
+            raise HTTPException(
+                status_code=404,
+                detail=f"No se encontró actividad con id: {actividad_id}"
+            )
+
+        doc_ref = collection_ref.document(matching_doc.id)
+        doc_ref.update(body)
+        updated_doc = doc_ref.get()
+        updated_data = updated_doc.to_dict() or {}
+        updated_data['id'] = actividad_id
+
+        return {
+            "success": True,
+            "id": actividad_id,
+            "message": "Actividad actualizada exitosamente",
+            "data": updated_data,
+            "timestamp": datetime.now(timezone.utc).isoformat()
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Error actualizando actividad del plan Distrito Verde: {str(e)}"
+        )
+
+
 @router.delete(
     "/grupo-operativo/eliminar-reporte",
     summary="🔴 DELETE | Eliminar Reporte",
