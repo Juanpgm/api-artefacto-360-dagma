@@ -10,7 +10,7 @@ sys.path.append(os.getcwd())
 client = TestClient(app)
 
 def test_convocar_actividad():
-    print("Testing /convocar_actividad endpoint...")
+    print("Testing /programar_actividad endpoint...")
     
     payload = {
         "fecha_actividad": "20/02/2026",
@@ -27,7 +27,7 @@ def test_convocar_actividad():
         "email": "juan.perez@email.com"
     }
     
-    response = client.post("/convocar_actividad", json=payload)
+    response = client.post("/programar_actividad", json=payload)
     
     print(f"Status Code: {response.status_code}")
     if response.status_code != 200:

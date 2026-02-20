@@ -84,7 +84,7 @@ $instructions = @"
    - Look for: "[OK] Firebase initialized successfully"
    
 8. Test by sending a request to:
-   POST /convocar_actividad
+    POST /programar_actividad
    
 Expected Response:
 {

@@ -1,15 +1,15 @@
 """
-Prueba para el endpoint POST /convocar_actividad
+Prueba para el endpoint POST /programar_actividad
 """
 import requests
 import json
 
 API_URL = "http://localhost:8000"
-ENDPOINT = f"{API_URL}/convocar_actividad"
+ENDPOINT = f"{API_URL}/programar_actividad"
 
 def test_convocar_actividad():
     """
-    Prueba del endpoint POST /convocar_actividad
+    Prueba del endpoint POST /programar_actividad
     """
     payload = {
         "fecha_actividad": "20/02/2026",
@@ -25,7 +25,7 @@ def test_convocar_actividad():
         "objetivo_actividad": "Limpieza de parque",
         "email": "juan.perez@email.com"
     }
-    print("\n📤 Enviando petición al endpoint /convocar_actividad...")
+    print("\n📤 Enviando petición al endpoint /programar_actividad...")
     print(f"   URL: {ENDPOINT}")
     print(f"   Payload: {json.dumps(payload, indent=2, ensure_ascii=False)}")
     response = requests.post(ENDPOINT, json=payload)

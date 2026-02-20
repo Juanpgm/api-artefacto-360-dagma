@@ -970,10 +970,10 @@ class ConvocarActividadResponse(BaseModel):
     data: dict
 
 @router.post(
-    "/convocar_actividad",
-    summary="🟢 POST | Convocar Actividad",
+    "/programar_actividad",
+    summary="🟢 POST | Programar Actividad",
     description="""
-## 🟢 POST | Convocar Actividad
+## 🟢 POST | Programar Actividad
 
 Registra una convocatoria de actividad con georreferenciación automática del punto de encuentro.
 
@@ -1129,18 +1129,18 @@ async def convocar_actividad(
             print(f"⚠️ Error creando evento en Google Calendar: {e}")
             actividad_data['calendar_event_error'] = str(e)
         # Guardar en Firebase
-        db.collection("convocatorias_actividades").document(actividad_id).set(actividad_data)
+        db.collection("plan_distrito_verde").document(actividad_id).set(actividad_data)
         return ConvocarActividadResponse(
             success=True,
             id=actividad_id,
-            message="Actividad convocada exitosamente",
+            message="Actividad programada exitosamente",
             marca_temporal=marca_temporal,
             data=actividad_data
         )
     except HTTPException:
         raise
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Error convocando actividad: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Error programando actividad: {str(e)}")
 @router.delete(
     "/grupo-operativo/eliminar-reporte",
     summary="🔴 DELETE | Eliminar Reporte",

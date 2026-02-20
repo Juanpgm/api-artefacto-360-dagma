@@ -157,7 +157,7 @@ PASO 3: Redeploy
 
 PASO 4: Prueba del Endpoint
 ────────────────────────────
-Envía una petición a POST /convocar_actividad
+Envía una petición a POST /programar_actividad
 
 Respuesta esperada:
   "success": true,
