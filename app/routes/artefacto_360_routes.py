@@ -1143,6 +1143,77 @@ async def convocar_actividad(
         raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error programando actividad: {str(e)}")
+
+
+@router.delete(
+    "/plan_distrito_verde/{actividad_id}",
+    summary="🔴 DELETE | Eliminar Actividad Programada",
+    description="""
+## 🔴 DELETE | Eliminar Actividad Programada
+
+**Propósito**: Eliminar un registro de la colección `plan_distrito_verde` a partir de su `id`.
+
+### 📥 Parámetros
+- **actividad_id**: ID del registro a eliminar
+
+### ✅ Respuesta exitosa
+```json
+{
+  "success": true,
+  "id": "abc-123",
+  "message": "Actividad eliminada exitosamente",
+  "timestamp": "2026-02-19T..."
+}
+```
+    """
+)
+async def delete_plan_distrito_verde(actividad_id: str):
+    """
+    Eliminar actividad del plan Distrito Verde por ID
+    """
+    try:
+        collection_ref = db.collection("plan_distrito_verde")
+
+        # Intentar primero por ID de documento
+        doc_ref = collection_ref.document(actividad_id)
+        doc_snapshot = doc_ref.get()
+
+        if doc_snapshot.exists:
+            doc_ref.delete()
+            return {
+                "success": True,
+                "id": actividad_id,
+                "message": "Actividad eliminada exitosamente",
+                "timestamp": datetime.now(timezone.utc).isoformat()
+            }
+
+        # Fallback: buscar por campo interno 'id'
+        docs = collection_ref.where("id", "==", actividad_id).limit(1).stream()
+        matching_doc = next(docs, None)
+
+        if not matching_doc:
+            raise HTTPException(
+                status_code=404,
+                detail=f"No se encontró actividad con id: {actividad_id}"
+            )
+
+        collection_ref.document(matching_doc.id).delete()
+
+        return {
+            "success": True,
+            "id": actividad_id,
+            "message": "Actividad eliminada exitosamente",
+            "timestamp": datetime.now(timezone.utc).isoformat()
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Error eliminando actividad del plan Distrito Verde: {str(e)}"
+        )
+
+
 @router.delete(
     "/grupo-operativo/eliminar-reporte",
     summary="🔴 DELETE | Eliminar Reporte",
