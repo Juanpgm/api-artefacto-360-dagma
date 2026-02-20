@@ -258,7 +258,17 @@ async def delete_user(uid: str, permanent: bool = False):
 
 # Endpoints de administración
 @router.get("/admin/users")
-async def list_system_users(request: Request, limit: Optional[int] = 50, offset: int = 0):
+async def list_system_users(
+    request: Request,
+    limit: Optional[int] = 50,
+    offset: int = 0,
+    full_name: Optional[str] = None,
+    grupo: Optional[str] = None,
+    email: Optional[str] = None,
+    cellphone: Optional[str] = None,
+    rol: Optional[str] = None,
+    uid: Optional[str] = None
+):
     """
     ## 📋 Listado de Usuarios desde Firestore
     
@@ -271,12 +281,28 @@ async def list_system_users(request: Request, limit: Optional[int] = 50, offset:
         if offset < 0:
             raise HTTPException(status_code=400, detail="El parámetro 'offset' no puede ser negativo")
 
-        reserved_params = {"limit", "offset"}
-        filters = {
+        filters = {}
+
+        explicit_filters = {
+            "full_name": full_name,
+            "grupo": grupo,
+            "email": email,
+            "cellphone": cellphone,
+            "rol": rol,
+            "uid": uid
+        }
+
+        for key, value in explicit_filters.items():
+            if value is not None and value.strip() != "":
+                filters[key] = value.strip()
+
+        reserved_params = {"limit", "offset", "full_name", "grupo", "email", "cellphone", "rol", "uid"}
+        extra_filters = {
             key: value.strip()
             for key, value in request.query_params.items()
             if key not in reserved_params and value is not None and value.strip() != ""
         }
+        filters.update(extra_filters)
 
         docs = db.collection('users').stream()
         filtered_users = []
