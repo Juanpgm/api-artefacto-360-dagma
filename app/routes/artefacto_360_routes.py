@@ -954,6 +954,7 @@ class PuntoEncuentroModel(BaseModel):
 class ConvocarActividadRequest(BaseModel):
     fecha_actividad: str = Field(..., description="Fecha en formato dd/mm/aaaa")
     hora_encuentro: str = Field(..., description="Hora en formato hh:mm")
+    tipo_jornada: str = Field(..., description="Tipo de jornada")
     grupos_requeridos: list[str] = Field(..., description="Lista de grupos requeridos")
     lider_actividad: str = Field(..., description="Líder de la actividad")
     punto_encuentro: dict = Field(..., description="Punto de encuentro (geometry, direccion)")
@@ -1013,6 +1014,7 @@ async def convocar_actividad(
             "marca_temporal": marca_temporal,
             "fecha_actividad": body.fecha_actividad,
             "hora_encuentro": body.hora_encuentro,
+            "tipo_jornada": body.tipo_jornada,
             "grupos_requeridos": body.grupos_requeridos,
             "lider_actividad": body.lider_actividad,
             "punto_encuentro": punto,
