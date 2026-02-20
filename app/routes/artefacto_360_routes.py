@@ -812,7 +812,66 @@ async def get_reportes(
         )
 
 
-# ==================== ENDPOINT 6: Obtener Actividades Plan Distrito Verde ====================#
+# ==================== ENDPOINT 6: Obtener Líderes por Grupo ====================#
+@router.get(
+    "/lideres_grupo",
+    summary="🔵 GET | Obtener Líderes de Grupo",
+    description="""
+## 🔵 GET | Obtener Líderes de Grupo
+
+**Propósito**: Consultar líderes desde la colección `lideres_grupos` en Firebase.
+
+### 📥 Parámetros
+- **grupo** (opcional): Filtrar líderes por nombre de grupo (coincidencia exacta)
+
+### 📝 Ejemplos de uso:
+```javascript
+// Obtener todos los líderes
+fetch('/lideres_grupo');
+
+// Filtrar por grupo
+fetch('/lideres_grupo?grupo=Grupo 1');
+```
+    """
+)
+async def get_lideres_grupo(
+    grupo: Optional[str] = Query(None, min_length=1, description="Filtrar por nombre de grupo")
+):
+    """
+    Obtener líderes de la colección lideres_grupos con filtro opcional por grupo
+    """
+    try:
+        lideres_ref = db.collection('lideres_grupos')
+        query = lideres_ref
+
+        if grupo:
+            query = query.where('grupo', '==', grupo.strip())
+
+        docs = query.stream()
+
+        lideres = []
+        for doc in docs:
+            data = doc.to_dict()
+            data['id'] = doc.id
+            lideres.append(data)
+
+        return {
+            "success": True,
+            "data": lideres,
+            "count": len(lideres),
+            "filters": {
+                "grupo": grupo.strip() if grupo else None
+            },
+            "timestamp": datetime.now(timezone.utc).isoformat()
+        }
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Error obteniendo líderes por grupo: {str(e)}"
+        )
+
+
+# ==================== ENDPOINT 7: Obtener Actividades Plan Distrito Verde ====================#
 @router.get(
     "/actividades_plan_distrito_verde",
     summary="🟢 GET | Obtener Actividades del Plan Distrito Verde",

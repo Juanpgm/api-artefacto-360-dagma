@@ -42,13 +42,14 @@ API para gestión de artefacto de captura DAGMA (Departamento Administrativo de 
 - `GET /init/parques` - Inicialización de parques para DAGMA
 - `POST /grupo-operativo/reconocimiento` - Registrar reconocimiento del grupo operativo
 - `GET /grupo-operativo/reportes` - Obtener reportes del grupo operativo
+- `GET /lideres_grupo` - Obtener líderes de grupo (todos o filtrado por `grupo`)
 - `DELETE /grupo-operativo/eliminar-reporte` - Eliminar reporte del grupo operativo
 
 ### Administración y Control de Accesos
 
 - `POST /auth/validate-session` - Validar sesión
 - `POST /auth/login` - Login de usuario
-- `POST /auth/register` - Registro de usuario
+- `POST /auth/register` - Registro de usuario (acepta `grupo` y `rol` como texto)
 - `POST /auth/change-password` - Cambiar contraseña
 - `POST /auth/google` - Autenticación con Google
 - `DELETE /auth/user/{uid}` - Eliminar usuario

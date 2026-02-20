@@ -29,6 +29,7 @@ class UserRegistrationRequest(BaseModel):
     full_name: str
     cellphone: str
     grupo: str
+    rol: Optional[str] = None
 
 class AssignRolesRequest(BaseModel):
     """Modelo para asignar roles"""
@@ -146,6 +147,7 @@ async def register_user(user_data: UserRegistrationRequest, request: Request):
             'full_name': user_data.full_name,
             'cellphone': user_data.cellphone,
             'grupo': user_data.grupo,
+            'rol': user_data.rol,
             'created_at': datetime.now(timezone.utc),
             'uid': user.uid
         })
