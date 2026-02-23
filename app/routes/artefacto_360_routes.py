@@ -275,20 +275,15 @@ async def get_init_parques():
 **Propósito**: Registrar un reporte de intervención realizado por el grupo cuadrilla DAGMA,
 incluyendo captura de coordenadas GPS y subida de fotos a Amazon S3.
 
-### ✅ Campos requeridos:
+### ✅ Campos opcionales disponibles:
 - **tipo_intervencion**: Tipo de intervención realizada
 - **descripcion_intervencion**: Descripción detallada de la intervención
-- **direccion**: Dirección del lugar intervenido
-- **objetivo_actividad**: Objetivo de la actividad
 - **tipo_arbol**: Tipo de árbol intervenido
 - **numero_individuos_intervenidos**: Número de individuos intervenidos (entero)
 - **registrado_por**: Persona que registra
 - **grupo**: Grupo operativo
-- **fecha_actividad**: Fecha de la actividad
-- **hora_encuentro**: Hora de encuentro
-- **lider_actividad**: Líder de la actividad
 - **id_actividad**: ID de la actividad asociada
-- **observaciones**: Observaciones adicionales (opcional)
+- **observaciones**: Observaciones adicionales
 - **coordinates_type**: Tipo de geometría (Point, LineString, Polygon)
 - **coordinates_data**: Coordenadas GPS en formato JSON array
 - **photos**: Archivos de fotos (multipart/form-data)
