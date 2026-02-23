@@ -265,21 +265,29 @@ async def get_init_parques():
         )
 
 
-# ==================== ENDPOINT 2: Registrar Reconocimiento ====================#
+# ==================== ENDPOINT 2: Registrar Reporte de Intervención ====================#
 @router.post(
-    "/grupo-operativo/reconocimiento",
-    summary="🟢 POST | Registrar Reconocimiento",
+    "/grupo-cuadrilla/reporte_intervencion",
+    summary="🟢 POST | Registrar Reporte de Intervención",
     description="""
-## 🟢 POST | Registrar Reconocimiento del Grupo Operativo DAGMA
+## 🟢 POST | Registrar Reporte de Intervención del Grupo Cuadrilla DAGMA
 
-**Propósito**: Registrar un reconocimiento realizado por el grupo operativo DAGMA,
+**Propósito**: Registrar un reporte de intervención realizado por el grupo cuadrilla DAGMA,
 incluyendo captura de coordenadas GPS y subida de fotos a Amazon S3.
 
 ### ✅ Campos requeridos:
 - **tipo_intervencion**: Tipo de intervención realizada
 - **descripcion_intervencion**: Descripción detallada de la intervención
 - **direccion**: Dirección del lugar intervenido
-- **nombre_parque**: Nombre del parque asociado (heredado de la colección 'parques')
+- **objetivo_actividad**: Objetivo de la actividad
+- **tipo_arbol**: Tipo de árbol intervenido
+- **numero_individuos_intervenidos**: Número de individuos intervenidos (entero)
+- **registrado_por**: Persona que registra
+- **grupo**: Grupo operativo
+- **fecha_actividad**: Fecha de la actividad
+- **hora_encuentro**: Hora de encuentro
+- **lider_actividad**: Líder de la actividad
+- **id_actividad**: ID de la actividad asociada
 - **observaciones**: Observaciones adicionales (opcional)
 - **coordinates_type**: Tipo de geometría (Point, LineString, Polygon)
 - **coordinates_data**: Coordenadas GPS en formato JSON array
@@ -289,8 +297,8 @@ incluyendo captura de coordenadas GPS y subida de fotos a Amazon S3.
 Las fotos se subirán al bucket **360-dagma-photos** en Amazon S3 con la siguiente estructura:
 ```
 360-dagma-photos/
-└── reconocimientos/
-    └── {id_reconocimiento}/
+└── reportes_intervenciones_grupo_cuadrilla/
+    └── {id_reporte}/
         └── {timestamp}_{filename}
 ```
 
@@ -306,7 +314,15 @@ const formData = new FormData();
 formData.append('tipo_intervencion', 'Mantenimiento');
 formData.append('descripcion_intervencion', 'Poda de árboles');
 formData.append('direccion', 'Calle 5 #10-20');
-formData.append('nombre_parque', 'Parque del Ingenio');
+formData.append('objetivo_actividad', 'Mantenimiento de zonas verdes');
+formData.append('tipo_arbol', 'Ceiba');
+formData.append('numero_individuos_intervenidos', '5');
+formData.append('registrado_por', 'Juan Pérez');
+formData.append('grupo', 'Grupo Operativo A');
+formData.append('fecha_actividad', '23/02/2026');
+formData.append('hora_encuentro', '08:00');
+formData.append('lider_actividad', 'María González');
+formData.append('id_actividad', 'abc-123-xyz');
 formData.append('observaciones', 'Trabajo completado satisfactoriamente');
 formData.append('coordinates_type', 'Point');
 formData.append('coordinates_data', '[-76.5225, 3.4516]');
@@ -315,7 +331,7 @@ formData.append('coordinates_data', '[-76.5225, 3.4516]');
 formData.append('photos', file1);
 formData.append('photos', file2);
 
-const response = await fetch('/grupo-operativo/reconocimiento', {
+const response = await fetch('/grupo-cuadrilla/reporte_intervencion', {
     method: 'POST',
     body: formData
 });
@@ -326,211 +342,229 @@ const response = await fetch('/grupo-operativo/reconocimiento', {
 {
     "success": true,
     "id": "uuid-generado",
-    "message": "Reconocimiento registrado exitosamente",
+    "message": "Reporte de intervención registrado exitosamente",
     "coordinates": {
         "type": "Point",
         "coordinates": [-76.5225, 3.4516]
     },
     "photosUrl": [
-        "https://360-dagma-photos.s3.amazonaws.com/reconocimientos/uuid/foto1.jpg",
-        "https://360-dagma-photos.s3.amazonaws.com/reconocimientos/uuid/foto2.jpg"
+        "https://360-dagma-photos.s3.amazonaws.com/reportes_intervenciones_grupo_cuadrilla/uuid/foto1.jpg",
+        "https://360-dagma-photos.s3.amazonaws.com/reportes_intervenciones_grupo_cuadrilla/uuid/foto2.jpg"
     ],
     "photos_uploaded": 2,
-    "timestamp": "2026-01-24T10:30:00Z"
+    "timestamp": "2026-02-23T10:30:00-05:00"
 }
 ```
     """,
     response_model=ReconocimientoResponse
 )
-async def post_reconocimiento(
-    tipo_intervencion: str = Form(..., min_length=1, description="Tipo de intervención"),
-    descripcion_intervencion: str = Form(..., min_length=1, description="Descripción de la intervención"),
-    direccion: str = Form(..., min_length=1, description="Dirección del lugar"),
-    nombre_parque: str = Form(..., min_length=1, description="Nombre del parque asociado (de la colección 'parques')"),
-    coordinates_type: str = Form(..., min_length=1, description="Tipo de geometría (Point, LineString, Polygon, etc.)"),
-    coordinates_data: str = Form(..., description="Coordenadas en formato JSON array. Ejemplo: [-76.5225, 3.4516]"),
-    photos: List[UploadFile] = File(..., description="Lista de archivos de fotos a subir a S3"),
-    observaciones: Optional[str] = Form(None, description="Observaciones adicionales (opcional)")
+async def post_reporte_intervencion(
+    tipo_intervencion: Optional[str] = Form(None, description="Tipo de intervención"),
+    descripcion_intervencion: Optional[str] = Form(None, description="Descripción de la intervención"),
+    direccion: Optional[str] = Form(None, description="Dirección del lugar"),
+    objetivo_actividad: Optional[str] = Form(None, description="Objetivo de la actividad"),
+    tipo_arbol: Optional[str] = Form(None, description="Tipo de árbol intervenido"),
+    numero_individuos_intervenidos: Optional[int] = Form(None, description="Número de individuos intervenidos"),
+    registrado_por: Optional[str] = Form(None, description="Persona que registra"),
+    grupo: Optional[str] = Form(None, description="Grupo operativo"),
+    fecha_actividad: Optional[str] = Form(None, description="Fecha de la actividad"),
+    hora_encuentro: Optional[str] = Form(None, description="Hora de encuentro"),
+    lider_actividad: Optional[str] = Form(None, description="Líder de la actividad"),
+    id_actividad: Optional[str] = Form(None, description="ID de la actividad asociada"),
+    coordinates_type: Optional[str] = Form(None, description="Tipo de geometría (Point, LineString, Polygon, etc.)"),
+    coordinates_data: Optional[str] = Form(None, description="Coordenadas en formato JSON array. Ejemplo: [-76.5225, 3.4516]"),
+    photos: Optional[List[UploadFile]] = File(None, description="Lista de archivos de fotos a subir a S3"),
+    observaciones: Optional[str] = Form(None, description="Observaciones adicionales")
 ):
     """
-    Registrar un reconocimiento del grupo operativo DAGMA
+    Registrar un reporte de intervención del grupo operativo DAGMA
     """
     try:
-        # Validar tipo de geometría
+        # Validar tipo de geometría (solo si se proporciona)
         valid_geometry_types = ["Point", "LineString", "Polygon", "MultiPoint", "MultiLineString", "MultiPolygon"]
-        if coordinates_type not in valid_geometry_types:
+        if coordinates_type and coordinates_type not in valid_geometry_types:
             raise HTTPException(
                 status_code=400,
                 detail=f"Tipo de geometría inválido. Permitidos: {', '.join(valid_geometry_types)}"
             )
         
-        # Validar cantidad de fotos
-        if not photos or len(photos) == 0:
+        # Validar cantidad de fotos (solo si se proporcionan)
+        if photos is not None and len(photos) > 10:
             raise HTTPException(
                 status_code=400,
-                detail="Debe proporcionar al menos una foto"
+                detail="Máximo 10 fotos por reporte de intervención"
             )
         
-        if len(photos) > 10:
-            raise HTTPException(
-                status_code=400,
-                detail="Máximo 10 fotos por reconocimiento"
-            )
+        # Validar cada foto (solo si se proporcionan)
+        if photos:
+            for photo in photos:
+                try:
+                    validate_photo_file(photo)
+                except ValueError as e:
+                    raise HTTPException(
+                        status_code=400,
+                        detail=f"Error en archivo '{photo.filename}': {str(e)}"
+                    )
         
-        # Validar cada foto
-        for photo in photos:
-            try:
-                validate_photo_file(photo)
-            except ValueError as e:
-                raise HTTPException(
-                    status_code=400,
-                    detail=f"Error en archivo '{photo.filename}': {str(e)}"
-                )
+        # Generar ID único para el reporte
+        reporte_id = str(uuid.uuid4())
         
-        # Generar ID único para el reconocimiento
-        reconocimiento_id = str(uuid.uuid4())
+        # Timestamp con zona horaria de Colombia
+        tz_col = pytz.timezone("America/Bogota")
+        timestamp = datetime.now(tz_col).isoformat()
         
-        # Parsear y validar coordenadas
-        try:
-            print(f"📍 Recibido coordinates_data: {repr(coordinates_data)}")
-            print(f"📍 Tipo: {type(coordinates_data)}, Long: {len(coordinates_data) if coordinates_data else 0}")
-            
-            # Intentar parsear como JSON
-            coordinates_str = coordinates_data.strip()
-            
-            # Si no empieza con '[', asumir que es formato "lon,lat" y convertirlo
-            if not coordinates_str.startswith('['):
-                # Formato: -76.5225,3.4516 o -76.5225, 3.4516
-                parts = coordinates_str.split(',')
-                if len(parts) == 2:
-                    try:
-                        lon = float(parts[0].strip())
-                        lat = float(parts[1].strip())
-                        coordinates = [lon, lat]
-                        print(f"✅ Coordenadas parseadas como lon,lat: {coordinates}")
-                    except ValueError:
-                        raise json.JSONDecodeError("Formato inválido", coordinates_str, 0)
-                else:
-                    raise json.JSONDecodeError("Debe tener formato [lon,lat]", coordinates_str, 0)
-            else:
-                # Formato JSON array: [-76.5225, 3.4516]
-                coordinates = json.loads(coordinates_str)
-                
-            validate_coordinates(coordinates, coordinates_type)
-        except json.JSONDecodeError as e:
-            print(f"❌ Error JSON: {str(e)}")
-            raise HTTPException(
-                status_code=400,
-                detail=f"Formato de coordenadas inválido. Envíe como '[lon,lat]' (ej: '[-76.5225,3.4516]') o 'lon,lat' (ej: '-76.5225,3.4516'). Recibido: '{coordinates_data}'"
-            )
-        except ValueError as e:
-            raise HTTPException(
-                status_code=400,
-                detail=f"Error en coordenadas: {str(e)}"
-            )
-        
-        # Crear objeto de geometría
-        geometry = {
-            "type": coordinates_type,
-            "coordinates": coordinates
-        }
-        
-        # Obtener ubicación geográfica (comuna/corregimiento y barrio/vereda)
-        # Solo funciona para geometría Point
+        # Parsear y validar coordenadas (solo si se proporcionan)
+        geometry = None
+        coordinates = None
         comuna_corregimiento = None
         barrio_vereda = None
         
-        if coordinates_type == "Point":
+        if coordinates_data and coordinates_type:
             try:
-                comuna_corregimiento, barrio_vereda = get_location_from_coordinates(coordinates)
-                if comuna_corregimiento:
-                    print(f"✅ Comuna/Corregimiento encontrada: {comuna_corregimiento}")
-                if barrio_vereda:
-                    print(f"✅ Barrio/Vereda encontrado: {barrio_vereda}")
-            except Exception as e:
-                print(f"⚠️ Error obteniendo ubicación: {str(e)}")
-        else:
-            print(f"ℹ️ La geolocalización solo es disponible para geometría Point, se capturó {coordinates_type}")
+                print(f"📍 Recibido coordinates_data: {repr(coordinates_data)}")
+                print(f"📍 Tipo: {type(coordinates_data)}, Long: {len(coordinates_data) if coordinates_data else 0}")
+                
+                # Intentar parsear como JSON
+                coordinates_str = coordinates_data.strip()
+                
+                # Si no empieza con '[', asumir que es formato "lon,lat" y convertirlo
+                if not coordinates_str.startswith('['):
+                    # Formato: -76.5225,3.4516 o -76.5225, 3.4516
+                    parts = coordinates_str.split(',')
+                    if len(parts) == 2:
+                        try:
+                            lon = float(parts[0].strip())
+                            lat = float(parts[1].strip())
+                            coordinates = [lon, lat]
+                            print(f"✅ Coordenadas parseadas como lon,lat: {coordinates}")
+                        except ValueError:
+                            raise json.JSONDecodeError("Formato inválido", coordinates_str, 0)
+                    else:
+                        raise json.JSONDecodeError("Debe tener formato [lon,lat]", coordinates_str, 0)
+                else:
+                    # Formato JSON array: [-76.5225, 3.4516]
+                    coordinates = json.loads(coordinates_str)
+                    
+                validate_coordinates(coordinates, coordinates_type)
+                
+                # Crear objeto de geometría
+                geometry = {
+                    "type": coordinates_type,
+                    "coordinates": coordinates
+                }
+                
+                # Obtener ubicación geográfica (solo para Point)
+                if coordinates_type == "Point":
+                    try:
+                        comuna_corregimiento, barrio_vereda = get_location_from_coordinates(coordinates)
+                        if comuna_corregimiento:
+                            print(f"✅ Comuna/Corregimiento encontrada: {comuna_corregimiento}")
+                        if barrio_vereda:
+                            print(f"✅ Barrio/Vereda encontrado: {barrio_vereda}")
+                    except Exception as e:
+                        print(f"⚠️ Error obteniendo ubicación: {str(e)}")
+                else:
+                    print(f"ℹ️ La geolocalización solo es disponible para geometría Point, se capturó {coordinates_type}")
+                    
+            except json.JSONDecodeError as e:
+                print(f"❌ Error JSON: {str(e)}")
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Formato de coordenadas inválido. Envíe como '[lon,lat]' (ej: '[-76.5225,3.4516]') o 'lon,lat' (ej: '-76.5225,3.4516'). Recibido: '{coordinates_data}'"
+                )
+            except ValueError as e:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Error en coordenadas: {str(e)}"
+                )
         
         # Obtener cliente S3 y bucket name
         bucket_name = os.getenv('S3_BUCKET_NAME', '360-dagma-photos')
         
-        # Subir fotos a S3
+        # Subir fotos a S3 (solo si se proporcionan)
         photos_urls = []
         s3_client = None
         
-        try:
-            s3_client = get_s3_client()
-        except ValueError as e:
-            # Si no hay credenciales de S3, advertir pero continuar (modo desarrollo)
-            print(f"⚠️ ADVERTENCIA: {str(e)}. Las fotos NO se subirán a S3.")
-        
-        for i, photo in enumerate(photos):
-            # Generar nombre único para la foto
-            timestamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
-            # Sanitizar el nombre del archivo
-            safe_filename = "".join(c for c in photo.filename if c.isalnum() or c in "._-")
-            photo_filename = f"{timestamp}_{i}_{safe_filename}"
+        if photos:
+            try:
+                s3_client = get_s3_client()
+            except ValueError as e:
+                # Si no hay credenciales de S3, advertir pero continuar (modo desarrollo)
+                print(f"⚠️ ADVERTENCIA: {str(e)}. Las fotos NO se subirán a S3.")
             
-            s3_key = f"reconocimientos/{reconocimiento_id}/{photo_filename}"
-            
-            if s3_client:
-                try:
-                    # Leer el contenido del archivo
-                    photo_content = await photo.read()
-                    
-                    # Subir a S3
-                    # Nota: No se usa ACL porque muchos buckets modernos tienen ACLs deshabilitadas
-                    # La accesibilidad pública se configura mediante Bucket Policy en AWS Console
-                    s3_client.upload_fileobj(
-                        io.BytesIO(photo_content),
-                        bucket_name,
-                        s3_key,
-                        ExtraArgs={
-                            'ContentType': photo.content_type
-                        }
-                    )
-                    
-                    # Generar URL pública
+            for i, photo in enumerate(photos):
+                # Generar nombre único para la foto
+                timestamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
+                # Sanitizar el nombre del archivo
+                safe_filename = "".join(c for c in photo.filename if c.isalnum() or c in "._-")
+                photo_filename = f"{timestamp}_{i}_{safe_filename}"
+                
+                s3_key = f"reportes_intervenciones_grupo_cuadrilla/{reporte_id}/{photo_filename}"
+                
+                if s3_client:
+                    try:
+                        # Leer el contenido del archivo
+                        photo_content = await photo.read()
+                        
+                        # Subir a S3
+                        # Nota: No se usa ACL porque muchos buckets modernos tienen ACLs deshabilitadas
+                        # La accesibilidad pública se configura mediante Bucket Policy en AWS Console
+                        s3_client.upload_fileobj(
+                            io.BytesIO(photo_content),
+                            bucket_name,
+                            s3_key,
+                            ExtraArgs={
+                                'ContentType': photo.content_type
+                            }
+                        )
+                        
+                        # Generar URL pública
+                        photo_url = f"https://{bucket_name}.s3.amazonaws.com/{s3_key}"
+                        photos_urls.append(photo_url)
+                        
+                        # Rebobinar el archivo para futuras lecturas si es necesario
+                        await photo.seek(0)
+                        
+                    except ClientError as e:
+                        print(f"❌ Error subiendo foto a S3: {str(e)}")
+                        raise HTTPException(
+                            status_code=500,
+                            detail=f"Error subiendo foto '{photo.filename}' a S3: {str(e)}"
+                        )
+                else:
+                    # Modo desarrollo: generar URL ficticia
                     photo_url = f"https://{bucket_name}.s3.amazonaws.com/{s3_key}"
                     photos_urls.append(photo_url)
-                    
-                    # Rebobinar el archivo para futuras lecturas si es necesario
-                    await photo.seek(0)
-                    
-                except ClientError as e:
-                    print(f"❌ Error subiendo foto a S3: {str(e)}")
-                    raise HTTPException(
-                        status_code=500,
-                        detail=f"Error subiendo foto '{photo.filename}' a S3: {str(e)}"
-                    )
-            else:
-                # Modo desarrollo: generar URL ficticia
-                photo_url = f"https://{bucket_name}.s3.amazonaws.com/{s3_key}"
-                photos_urls.append(photo_url)
-                print(f"⚠️ Modo desarrollo: URL ficticia generada para {photo.filename}")
+                    print(f"⚠️ Modo desarrollo: URL ficticia generada para {photo.filename}")
         
         # Preparar datos para guardar en Firebase
-        reconocimiento_data = {
-            "id": reconocimiento_id,
+        reporte_data = {
+            "id": reporte_id,
             "tipo_intervencion": tipo_intervencion,
             "descripcion_intervencion": descripcion_intervencion,
             "direccion": direccion,
-            "nombre_parque": nombre_parque,
+            "objetivo_actividad": objetivo_actividad,
+            "tipo_arbol": tipo_arbol,
+            "numero_individuos_intervenidos": numero_individuos_intervenidos,
+            "registrado_por": registrado_por,
+            "grupo": grupo,
+            "fecha_actividad": fecha_actividad,
+            "hora_encuentro": hora_encuentro,
+            "lider_actividad": lider_actividad,
+            "id_actividad": id_actividad,
             "observaciones": observaciones or "",
             "coordinates": geometry,
             "comuna_corregimiento": comuna_corregimiento,
             "barrio_vereda": barrio_vereda,
             "photosUrl": photos_urls,
             "photos_uploaded": len(photos_urls),
-            "created_at": datetime.now(timezone.utc).isoformat(),
-            "timestamp": datetime.now(timezone.utc).isoformat()
+            "timestamp": timestamp
         }
         
         # Guardar en Firebase
         try:
-            db.collection('reconocimientos_dagma').document(reconocimiento_id).set(reconocimiento_data)
-            print(f"✅ Reconocimiento {reconocimiento_id} guardado en Firebase")
+            db.collection('reportes_intervenciones_grupo_cuadrilla').document(reporte_id).set(reporte_data)
+            print(f"✅ Reporte de intervención {reporte_id} guardado en Firebase")
         except Exception as e:
             print(f"❌ Error guardando en Firebase: {str(e)}")
             # Si falla Firebase, intentar eliminar fotos de S3 (rollback)
@@ -548,13 +582,13 @@ async def post_reconocimiento(
         
         return ReconocimientoResponse(
             success=True,
-            id=reconocimiento_id,
-            message="Reconocimiento registrado exitosamente",
-            nombre_parque=nombre_parque,
+            id=reporte_id,
+            message="Reporte de intervención registrado exitosamente",
+            nombre_parque=objetivo_actividad,
             coordinates=geometry,
             photosUrl=photos_urls,
             photos_uploaded=len(photos_urls),
-            timestamp=datetime.now(timezone.utc).isoformat()
+            timestamp=timestamp
         )
         
     except HTTPException:
@@ -562,7 +596,7 @@ async def post_reconocimiento(
     except Exception as e:
         raise HTTPException(
             status_code=500,
-            detail=f"Error registrando reconocimiento: {str(e)}"
+            detail=f"Error registrando reporte de intervención: {str(e)}"
         )
 
 
