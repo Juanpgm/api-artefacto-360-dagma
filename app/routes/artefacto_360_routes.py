@@ -919,19 +919,20 @@ async def get_actividades_plan_distrito_verde(id: Optional[str] = Query(None, de
     Obtener actividades del plan Distrito Verde de Firebase, opcionalmente filtradas por ID
     """
     try:
-        def obtener_personal_asignado(actividad_id: str) -> list[dict]:
+        def obtener_personal_asignado(actividad_document_id: str, actividad_id_interno: Optional[str] = None) -> list[dict]:
             personal_encontrado = []
             ids_vistos = set()
 
-            # Colección solicitada por requerimiento actual
-            colecciones_personal = [
-                "personal_asignado-actividad",
-                # Compatibilidad con implementación previa
-                "personal_asignado_atividad",
+            consultas = [
+                ("actividad_document_id", actividad_document_id),
+                ("actividad_id", actividad_document_id),
             ]
 
-            for nombre_coleccion in colecciones_personal:
-                docs_personal = db.collection(nombre_coleccion).where("actividad_id", "==", actividad_id).stream()
+            if actividad_id_interno and actividad_id_interno != actividad_document_id:
+                consultas.append(("actividad_id", actividad_id_interno))
+
+            for campo, valor in consultas:
+                docs_personal = db.collection("personal_asignado_actividad").where(campo, "==", valor).stream()
                 for doc_personal in docs_personal:
                     if doc_personal.id in ids_vistos:
                         continue
@@ -951,8 +952,9 @@ async def get_actividades_plan_distrito_verde(id: Optional[str] = Query(None, de
             doc = plan_ref.document(id).get()
             if doc.exists:
                 data = doc.to_dict()
+                actividad_id_interno = data.get("id") if isinstance(data, dict) else None
                 data['id'] = doc.id
-                data['grupo'] = obtener_personal_asignado(doc.id)
+                data['grupo'] = obtener_personal_asignado(doc.id, actividad_id_interno)
                 return {
                     "success": True,
                     "total": 1,
@@ -966,8 +968,9 @@ async def get_actividades_plan_distrito_verde(id: Optional[str] = Query(None, de
             actividades = []
             for doc in docs:
                 data = doc.to_dict()
+                actividad_id_interno = data.get("id") if isinstance(data, dict) else None
                 data['id'] = doc.id
-                data['grupo'] = obtener_personal_asignado(doc.id)
+                data['grupo'] = obtener_personal_asignado(doc.id, actividad_id_interno)
                 actividades.append(data)
             
             if not actividades:
@@ -993,9 +996,10 @@ async def get_actividades_plan_distrito_verde(id: Optional[str] = Query(None, de
         actividades = []
         for doc in docs:
             data = doc.to_dict()
+            actividad_id_interno = data.get("id") if isinstance(data, dict) else None
             # Agregar el ID del documento a los datos
             data['id'] = doc.id
-            data['grupo'] = obtener_personal_asignado(doc.id)
+            data['grupo'] = obtener_personal_asignado(doc.id, actividad_id_interno)
             actividades.append(data)
         
         return {
@@ -1309,7 +1313,7 @@ async def asignar_personal_actividad(
                 "marca_temporal": marca_temporal,
             }
 
-            db.collection("personal_asignado-actividad").document(asignacion_id).set(personal_data)
+            db.collection("personal_asignado_actividad").document(asignacion_id).set(personal_data)
             registros_guardados.append(personal_data)
             ids_creados.append(asignacion_id)
 
