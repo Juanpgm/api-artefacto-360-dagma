@@ -136,14 +136,6 @@ def generar_reporte(numero):
         data['descripcion_intervencion'] = f"Intervención #{numero}: {random.choice(['Trabajo realizado con éxito', 'Operación completada', 'Actividad ejecutada correctamente', 'Labor finalizada'])}"
         print(f"Descripción: {data['descripcion_intervencion']}")
     
-    if random.random() > 0.2:
-        data['direccion'] = random.choice(DIRECCIONES)
-        print(f"Dirección: {data['direccion']}")
-    
-    if random.random() > 0.2:
-        data['objetivo_actividad'] = random.choice(OBJETIVOS_ACTIVIDAD)
-        print(f"Objetivo: {data['objetivo_actividad']}")
-    
     if random.random() > 0.3:  # 70% de probabilidad
         data['tipo_arbol'] = random.choice(TIPOS_ARBOL)
         print(f"Tipo árbol: {data['tipo_arbol']}")
@@ -159,18 +151,6 @@ def generar_reporte(numero):
     if random.random() > 0.2:
         data['grupo'] = generar_grupo_aleatorio()
         print(f"Grupo: {data['grupo']}")
-    
-    if random.random() > 0.2:
-        data['fecha_actividad'] = generar_fecha_aleatoria()
-        print(f"Fecha actividad: {data['fecha_actividad']}")
-    
-    if random.random() > 0.2:
-        data['hora_encuentro'] = generar_hora_aleatoria()
-        print(f"Hora encuentro: {data['hora_encuentro']}")
-    
-    if random.random() > 0.2:
-        data['lider_actividad'] = random.choice(LIDERES)
-        print(f"Líder: {data['lider_actividad']}")
     
     if random.random() > 0.4:  # 60% de probabilidad
         data['id_actividad'] = f"ACT-2026-{random.randint(1000, 9999)}"
