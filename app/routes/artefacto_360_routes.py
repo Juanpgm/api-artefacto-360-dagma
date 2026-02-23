@@ -919,6 +919,29 @@ async def get_actividades_plan_distrito_verde(id: Optional[str] = Query(None, de
     Obtener actividades del plan Distrito Verde de Firebase, opcionalmente filtradas por ID
     """
     try:
+        def obtener_personal_asignado(actividad_id: str) -> list[dict]:
+            personal_encontrado = []
+            ids_vistos = set()
+
+            # Colección solicitada por requerimiento actual
+            colecciones_personal = [
+                "personal_asignado-actividad",
+                # Compatibilidad con implementación previa
+                "personal_asignado_atividad",
+            ]
+
+            for nombre_coleccion in colecciones_personal:
+                docs_personal = db.collection(nombre_coleccion).where("actividad_id", "==", actividad_id).stream()
+                for doc_personal in docs_personal:
+                    if doc_personal.id in ids_vistos:
+                        continue
+                    personal_data = doc_personal.to_dict() or {}
+                    personal_data["id"] = doc_personal.id
+                    personal_encontrado.append(personal_data)
+                    ids_vistos.add(doc_personal.id)
+
+            return personal_encontrado
+
         # Obtener referencia a la colección
         plan_ref = db.collection('plan_distrito_verde')
         
@@ -929,6 +952,7 @@ async def get_actividades_plan_distrito_verde(id: Optional[str] = Query(None, de
             if doc.exists:
                 data = doc.to_dict()
                 data['id'] = doc.id
+                data['grupo'] = obtener_personal_asignado(doc.id)
                 return {
                     "success": True,
                     "total": 1,
@@ -943,6 +967,7 @@ async def get_actividades_plan_distrito_verde(id: Optional[str] = Query(None, de
             for doc in docs:
                 data = doc.to_dict()
                 data['id'] = doc.id
+                data['grupo'] = obtener_personal_asignado(doc.id)
                 actividades.append(data)
             
             if not actividades:
@@ -970,6 +995,7 @@ async def get_actividades_plan_distrito_verde(id: Optional[str] = Query(None, de
             data = doc.to_dict()
             # Agregar el ID del documento a los datos
             data['id'] = doc.id
+            data['grupo'] = obtener_personal_asignado(doc.id)
             actividades.append(data)
         
         return {
@@ -1016,6 +1042,23 @@ class ConvocarActividadResponse(BaseModel):
     message: str
     marca_temporal: str
     data: dict
+
+
+class AsignarPersonalActividadRequest(BaseModel):
+    id: str = Field(..., min_length=1, description="ID de la actividad a la que se asigna el personal")
+    email: str = Field(..., min_length=1, description="Correo electrónico del personal")
+    grupo: str = Field(..., min_length=1, description="Grupo al que pertenece el personal")
+    nombre_completo: str = Field(..., min_length=1, description="Nombre completo del personal")
+    telefono: str = Field(..., min_length=1, description="Teléfono de contacto del personal")
+
+
+class AsignarPersonalActividadResponse(BaseModel):
+    success: bool
+    total_registros: int
+    ids: list[str]
+    message: str
+    marca_temporal: str
+    data: list[dict]
 
 @router.post(
     "/programar_actividad",
@@ -1192,6 +1235,98 @@ async def convocar_actividad(
         raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error programando actividad: {str(e)}")
+
+
+@router.post(
+    "/asignar_personal_actividad",
+    summary="🟢 POST | Asignar Personal a Actividad",
+    description="""
+## 🟢 POST | Asignar Personal a Actividad
+
+Registra personal asignado a una actividad del plan Distrito Verde.
+
+**Tag:** Artefacto de Captura DAGMA
+""",
+    tags=["Artefacto de Captura DAGMA"],
+    response_model=AsignarPersonalActividadResponse
+)
+async def asignar_personal_actividad(
+    body: List[AsignarPersonalActividadRequest] = Body(...)
+):
+    """
+    Asignar múltiples registros de personal a actividades y guardarlos en Firebase.
+    """
+    try:
+        if not body:
+            raise HTTPException(status_code=400, detail="Debe enviar al menos un registro de personal")
+
+        plan_ref = db.collection("plan_distrito_verde")
+        cache_actividades: dict[str, str] = {}
+
+        def resolver_actividad_document_id(actividad_id: str) -> str:
+            if actividad_id in cache_actividades:
+                return cache_actividades[actividad_id]
+
+            actividad_doc_ref = plan_ref.document(actividad_id)
+            actividad_doc = actividad_doc_ref.get()
+
+            if actividad_doc.exists:
+                cache_actividades[actividad_id] = actividad_id
+                return actividad_id
+
+            docs = plan_ref.where("id", "==", actividad_id).limit(1).stream()
+            matching_doc = next(docs, None)
+            if not matching_doc:
+                raise HTTPException(
+                    status_code=404,
+                    detail=f"No se encontró actividad con id: {actividad_id}"
+                )
+
+            cache_actividades[actividad_id] = matching_doc.id
+            return matching_doc.id
+
+        tz_col = pytz.timezone("America/Bogota")
+        registros_guardados = []
+        ids_creados = []
+
+        for item in body:
+            actividad_id = item.id.strip()
+            if not actividad_id:
+                raise HTTPException(status_code=400, detail="El campo 'id' de actividad es obligatorio en todos los registros")
+
+            actividad_document_id = resolver_actividad_document_id(actividad_id)
+            marca_temporal = datetime.now(tz_col).isoformat()
+            asignacion_id = str(uuid.uuid4())
+
+            personal_data = {
+                "id": asignacion_id,
+                "actividad_id": actividad_id,
+                "actividad_document_id": actividad_document_id,
+                "email": item.email.strip(),
+                "grupo": item.grupo.strip(),
+                "nombre_completo": item.nombre_completo.strip(),
+                "telefono": item.telefono.strip(),
+                "marca_temporal": marca_temporal,
+            }
+
+            db.collection("personal_asignado-actividad").document(asignacion_id).set(personal_data)
+            registros_guardados.append(personal_data)
+            ids_creados.append(asignacion_id)
+
+        marca_respuesta = datetime.now(tz_col).isoformat()
+
+        return AsignarPersonalActividadResponse(
+            success=True,
+            total_registros=len(registros_guardados),
+            ids=ids_creados,
+            message="Personal asignado a la actividad exitosamente",
+            marca_temporal=marca_respuesta,
+            data=registros_guardados
+        )
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error asignando personal a actividad: {str(e)}")
 
 
 @router.delete(
