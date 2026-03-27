@@ -163,6 +163,53 @@ def validate_coordinates(coordinates: list, geometry_type: str) -> bool:
     return True
 
 
+def validate_arboles_data(arboles_data: str) -> list:
+    """
+    Valida y parsea el campo arboles_data (JSON string) con la lista de árboles.
+    Cada árbol debe tener 'especie' (str) y 'cantidad' (int > 0).
+    Retorna la lista de árboles parseada.
+    """
+    try:
+        arboles = json.loads(arboles_data)
+    except (json.JSONDecodeError, ValueError):
+        raise ValueError(
+            "El campo arboles_data debe ser un JSON válido. "
+            "Ejemplo: '[{\"especie\": \"Ceiba\", \"cantidad\": 5}]'"
+        )
+
+    if not isinstance(arboles, list):
+        raise ValueError("arboles_data debe ser un array JSON. Ejemplo: '[{\"especie\": \"Ceiba\", \"cantidad\": 5}]'")
+
+    if len(arboles) == 0:
+        raise ValueError("arboles_data debe contener al menos un árbol")
+
+    validated = []
+    for i, arbol in enumerate(arboles):
+        if not isinstance(arbol, dict):
+            raise ValueError(f"El árbol en la posición {i} debe ser un objeto con 'especie' y 'cantidad'")
+
+        especie = arbol.get("especie")
+        cantidad = arbol.get("cantidad")
+
+        if not especie or not isinstance(especie, str) or not especie.strip():
+            raise ValueError(f"El árbol en la posición {i} debe tener un campo 'especie' (texto no vacío)")
+
+        if cantidad is None:
+            raise ValueError(f"El árbol en la posición {i} debe tener un campo 'cantidad'")
+
+        try:
+            cantidad_int = int(cantidad)
+        except (TypeError, ValueError):
+            raise ValueError(f"El campo 'cantidad' del árbol en la posición {i} debe ser un número entero")
+
+        if cantidad_int <= 0:
+            raise ValueError(f"El campo 'cantidad' del árbol en la posición {i} debe ser mayor que 0")
+
+        validated.append({"especie": especie.strip(), "cantidad": cantidad_int})
+
+    return validated
+
+
 def validate_photo_file(file: UploadFile) -> bool:
     """
     Valida que el archivo sea una imagen válida
@@ -278,8 +325,7 @@ incluyendo captura de coordenadas GPS y subida de fotos a Amazon S3.
 ### ✅ Campos opcionales disponibles:
 - **tipo_intervencion**: Tipo de intervención realizada
 - **descripcion_intervencion**: Descripción detallada de la intervención
-- **tipo_arbol**: Tipo de árbol intervenido
-- **numero_individuos_intervenidos**: Número de individuos intervenidos (entero)
+- **arboles_data**: Lista de árboles intervenidos en formato JSON array. Cada árbol debe incluir `especie` y `cantidad`. Ejemplo: `[{"especie": "Ceiba", "cantidad": 5}, {"especie": "Guayacán", "cantidad": 3}]`
 - **registrado_por**: Persona que registra
 - **grupo**: Grupo operativo
 - **id_actividad**: ID de la actividad asociada
@@ -310,8 +356,7 @@ formData.append('tipo_intervencion', 'Mantenimiento');
 formData.append('descripcion_intervencion', 'Poda de árboles');
 formData.append('direccion', 'Calle 5 #10-20');
 formData.append('objetivo_actividad', 'Mantenimiento de zonas verdes');
-formData.append('tipo_arbol', 'Ceiba');
-formData.append('numero_individuos_intervenidos', '5');
+formData.append('arboles_data', '[{"especie": "Ceiba", "cantidad": 5}, {"especie": "Guayacán", "cantidad": 3}]');
 formData.append('registrado_por', 'Juan Pérez');
 formData.append('grupo', 'Grupo Operativo A');
 formData.append('fecha_actividad', '23/02/2026');
@@ -356,8 +401,7 @@ const response = await fetch('/grupo-cuadrilla/reporte_intervencion', {
 async def post_reporte_intervencion(
     tipo_intervencion: Optional[str] = Form(None, description="Tipo de intervención"),
     descripcion_intervencion: Optional[str] = Form(None, description="Descripción de la intervención"),
-    tipo_arbol: Optional[str] = Form(None, description="Tipo de árbol intervenido"),
-    numero_individuos_intervenidos: Optional[int] = Form(None, description="Número de individuos intervenidos"),
+    arboles_data: Optional[str] = Form(None, description='Lista de árboles en formato JSON array. Ejemplo: [{"especie": "Ceiba", "cantidad": 5}, {"especie": "Guayacán", "cantidad": 3}]'),
     registrado_por: Optional[str] = Form(None, description="Persona que registra"),
     grupo: Optional[str] = Form(None, description="Grupo operativo"),
     id_actividad: Optional[str] = Form(None, description="ID de la actividad asociada"),
@@ -367,7 +411,8 @@ async def post_reporte_intervencion(
     observaciones: Optional[str] = Form(None, description="Observaciones adicionales")
 ):
     """
-    Registrar un reporte de intervención del grupo operativo DAGMA
+    Registrar un reporte de intervención del grupo cuadrilla DAGMA.
+    Acepta información de varios árboles con sus especies y cantidades mediante el campo arboles_data.
     """
     try:
         # Validar tipo de geometría (solo si se proporciona)
@@ -377,7 +422,18 @@ async def post_reporte_intervencion(
                 status_code=400,
                 detail=f"Tipo de geometría inválido. Permitidos: {', '.join(valid_geometry_types)}"
             )
-        
+
+        # Parsear y validar arboles_data (solo si se proporciona)
+        arboles = None
+        if arboles_data:
+            try:
+                arboles = validate_arboles_data(arboles_data)
+            except ValueError as e:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Error en arboles_data: {str(e)}"
+                )
+
         # Validar cantidad de fotos (solo si se proporcionan)
         if photos is not None and len(photos) > 10:
             raise HTTPException(
@@ -532,8 +588,7 @@ async def post_reporte_intervencion(
             "id": reporte_id,
             "tipo_intervencion": tipo_intervencion,
             "descripcion_intervencion": descripcion_intervencion,
-            "tipo_arbol": tipo_arbol,
-            "numero_individuos_intervenidos": numero_individuos_intervenidos,
+            "arboles": arboles,
             "registrado_por": registrado_por,
             "grupo": grupo,
             "id_actividad": id_actividad,
@@ -630,8 +685,10 @@ fetch('/grupo-cuadrilla/reportes_intervenciones?id_actividad=ACT-2026-1234&grupo
       "id": "uuid",
       "tipo_intervencion": "Poda de árboles",
       "descripcion_intervencion": "...",
-      "tipo_arbol": "Ceiba",
-      "numero_individuos_intervenidos": 10,
+      "arboles": [
+        {"especie": "Ceiba", "cantidad": 10},
+        {"especie": "Guayacán", "cantidad": 5}
+      ],
       "registrado_por": "Juan Pérez",
       "grupo": "Cuadrilla Verde A",
       "id_actividad": "ACT-2026-1234",
