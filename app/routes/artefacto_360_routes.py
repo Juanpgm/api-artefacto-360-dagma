@@ -1574,3 +1574,1821 @@ async def delete_reporte(
             status_code=500,
             detail=f"Error eliminando reporte: {str(e)}"
         )
+
+
+# ==================== ENDPOINT: Registrar Reporte de Intervención - Grupo Vivero ====================#
+@router.post(
+    "/grupo-vivero/reporte_intervencion",
+    summary="🟢 POST | Registrar Reporte de Intervención",
+    description="""
+## 🟢 POST | Registrar Reporte de Intervención del Grupo Vivero
+
+**Propósito**: Registrar un reporte de intervención realizado por el grupo vivero DAGMA,
+incluyendo captura de coordenadas GPS y subida de fotos a Amazon S3.
+
+### ✅ Campos disponibles:
+- **tipo_intervencion**: Tipo de intervención realizada
+- **tipos_plantas**: Diccionario JSON con tipos de plantas y cantidad por tipo. Ejemplo: `{"Guayacán": 10, "Ceiba": 5, "Samán": 3}`
+- **descripcion_intervencion**: Descripción detallada de la intervención
+- **direccion**: Dirección donde se realizó la intervención
+- **registrado_por**: Persona que registra
+- **grupo**: Grupo operativo
+- **id_actividad**: ID de la actividad asociada
+- **observaciones**: Observaciones adicionales
+- **coordinates_type**: Tipo de geometría (Point, LineString, Polygon)
+- **coordinates_data**: Coordenadas GPS en formato JSON array
+- **photos**: Archivos de fotos (multipart/form-data)
+
+### 📸 Almacenamiento de Fotos:
+Las fotos se subirán al bucket **360-dagma-photos** en Amazon S3 con la siguiente estructura:
+```
+360-dagma-photos/
+└── reportes_intervenciones_grupo_vivero/
+    └── {id_reporte}/
+        └── {timestamp}_{filename}
+```
+
+### 📝 Ejemplo de uso con FormData:
+```javascript
+const formData = new FormData();
+formData.append('tipo_intervencion', 'Siembra');
+formData.append('tipos_plantas', JSON.stringify({"Guayacán": 10, "Ceiba": 5, "Samán": 3}));
+formData.append('descripcion_intervencion', 'Siembra de árboles nativos');
+formData.append('direccion', 'Calle 5 #10-20');
+formData.append('registrado_por', 'Juan Pérez');
+formData.append('grupo', 'Vivero Municipal');
+formData.append('id_actividad', 'abc-123-xyz');
+formData.append('observaciones', 'Trabajo completado satisfactoriamente');
+formData.append('coordinates_type', 'Point');
+formData.append('coordinates_data', '[-76.5225, 3.4516]');
+
+// Agregar fotos
+formData.append('photos', file1);
+formData.append('photos', file2);
+
+const response = await fetch('/grupo-vivero/reporte_intervencion', {
+    method: 'POST',
+    body: formData
+});
+```
+
+### ✅ Respuesta exitosa:
+```json
+{
+    "success": true,
+    "id": "uuid-generado",
+    "message": "Reporte de intervención del grupo vivero registrado exitosamente",
+    "coordinates": {
+        "type": "Point",
+        "coordinates": [-76.5225, 3.4516]
+    },
+    "photosUrl": [
+        "https://360-dagma-photos.s3.amazonaws.com/reportes_intervenciones_grupo_vivero/uuid/foto1.jpg"
+    ],
+    "photos_uploaded": 1,
+    "timestamp": "2026-02-23T10:30:00-05:00"
+}
+```
+    """,
+    response_model=ReconocimientoResponse
+)
+async def post_reporte_intervencion_grupo_vivero(
+    tipo_intervencion: Optional[str] = Form(None, description="Tipo de intervención"),
+    tipos_plantas: Optional[str] = Form(None, description="Diccionario JSON con tipos de plantas y cantidad. Ej: {\"Guayacán\": 10, \"Ceiba\": 5}"),
+    descripcion_intervencion: Optional[str] = Form(None, description="Descripción de la intervención"),
+    direccion: Optional[str] = Form(None, description="Dirección de la intervención"),
+    registrado_por: Optional[str] = Form(None, description="Persona que registra"),
+    grupo: Optional[str] = Form(None, description="Grupo operativo"),
+    id_actividad: Optional[str] = Form(None, description="ID de la actividad asociada"),
+    observaciones: Optional[str] = Form(None, description="Observaciones adicionales"),
+    coordinates_type: Optional[str] = Form(None, description="Tipo de geometría (Point, LineString, Polygon, etc.)"),
+    coordinates_data: Optional[str] = Form(None, description="Coordenadas en formato JSON array. Ejemplo: [-76.5225, 3.4516]"),
+    photos: Optional[List[UploadFile]] = File(None, description="Lista de archivos de fotos a subir a S3")
+):
+    """
+    Registrar un reporte de intervención del grupo vivero DAGMA
+    """
+    try:
+        # Validar tipo de geometría
+        valid_geometry_types = ["Point", "LineString", "Polygon", "MultiPoint", "MultiLineString", "MultiPolygon"]
+        if coordinates_type and coordinates_type not in valid_geometry_types:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Tipo de geometría inválido. Permitidos: {', '.join(valid_geometry_types)}"
+            )
+
+        # Validar y parsear tipos_plantas como diccionario
+        tipos_plantas_dict = None
+        cantidad_total_plantas = 0
+        if tipos_plantas:
+            try:
+                tipos_plantas_dict = json.loads(tipos_plantas)
+                if not isinstance(tipos_plantas_dict, dict):
+                    raise HTTPException(
+                        status_code=400,
+                        detail="tipos_plantas debe ser un objeto JSON (diccionario). Ej: {\"Guayacán\": 10, \"Ceiba\": 5}"
+                    )
+                # Validar que los valores sean enteros positivos
+                for planta, cantidad in tipos_plantas_dict.items():
+                    if not isinstance(cantidad, (int, float)) or cantidad < 0:
+                        raise HTTPException(
+                            status_code=400,
+                            detail=f"La cantidad para '{planta}' debe ser un número positivo. Recibido: {cantidad}"
+                        )
+                    tipos_plantas_dict[planta] = int(cantidad)
+                cantidad_total_plantas = sum(tipos_plantas_dict.values())
+            except json.JSONDecodeError:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Formato JSON inválido en tipos_plantas. Envíe como '{{\"Guayacán\": 10, \"Ceiba\": 5}}'. Recibido: '{tipos_plantas}'"
+                )
+
+        # Validar cantidad de fotos
+        if photos is not None and len(photos) > 10:
+            raise HTTPException(
+                status_code=400,
+                detail="Máximo 10 fotos por reporte de intervención"
+            )
+
+        # Validar cada foto
+        if photos:
+            for photo in photos:
+                try:
+                    validate_photo_file(photo)
+                except ValueError as e:
+                    raise HTTPException(
+                        status_code=400,
+                        detail=f"Error en archivo '{photo.filename}': {str(e)}"
+                    )
+
+        # Generar ID único para el reporte
+        reporte_id = str(uuid.uuid4())
+
+        # Timestamp con zona horaria de Colombia
+        tz_col = pytz.timezone("America/Bogota")
+        timestamp = datetime.now(tz_col).isoformat()
+
+        # Parsear y validar coordenadas
+        geometry = None
+        coordinates = None
+        comuna_corregimiento = None
+        barrio_vereda = None
+
+        if coordinates_data and coordinates_type:
+            try:
+                print(f"📍 Recibido coordinates_data: {repr(coordinates_data)}")
+
+                coordinates_str = coordinates_data.strip()
+
+                if not coordinates_str.startswith('['):
+                    parts = coordinates_str.split(',')
+                    if len(parts) == 2:
+                        try:
+                            lon = float(parts[0].strip())
+                            lat = float(parts[1].strip())
+                            coordinates = [lon, lat]
+                        except ValueError:
+                            raise json.JSONDecodeError("Formato inválido", coordinates_str, 0)
+                    else:
+                        raise json.JSONDecodeError("Debe tener formato [lon,lat]", coordinates_str, 0)
+                else:
+                    coordinates = json.loads(coordinates_str)
+
+                validate_coordinates(coordinates, coordinates_type)
+
+                geometry = {
+                    "type": coordinates_type,
+                    "coordinates": coordinates
+                }
+
+                if coordinates_type == "Point":
+                    try:
+                        comuna_corregimiento, barrio_vereda = get_location_from_coordinates(coordinates)
+                        if comuna_corregimiento:
+                            print(f"✅ Comuna/Corregimiento encontrada: {comuna_corregimiento}")
+                        if barrio_vereda:
+                            print(f"✅ Barrio/Vereda encontrado: {barrio_vereda}")
+                    except Exception as e:
+                        print(f"⚠️ Error obteniendo ubicación: {str(e)}")
+                else:
+                    print(f"ℹ️ La geolocalización solo es disponible para geometría Point, se capturó {coordinates_type}")
+
+            except json.JSONDecodeError as e:
+                print(f"❌ Error JSON: {str(e)}")
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Formato de coordenadas inválido. Envíe como '[lon,lat]' (ej: '[-76.5225,3.4516]') o 'lon,lat' (ej: '-76.5225,3.4516'). Recibido: '{coordinates_data}'"
+                )
+            except ValueError as e:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Error en coordenadas: {str(e)}"
+                )
+
+        # Obtener cliente S3 y bucket name
+        bucket_name = os.getenv('S3_BUCKET_NAME', '360-dagma-photos')
+
+        # Subir fotos a S3
+        photos_urls = []
+        s3_client = None
+
+        if photos:
+            try:
+                s3_client = get_s3_client()
+            except ValueError as e:
+                print(f"⚠️ ADVERTENCIA: {str(e)}. Las fotos NO se subirán a S3.")
+
+            for i, photo in enumerate(photos):
+                ts_photo = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
+                safe_filename = "".join(c for c in photo.filename if c.isalnum() or c in "._-")
+                photo_filename = f"{ts_photo}_{i}_{safe_filename}"
+
+                s3_key = f"reportes_intervenciones_grupo_vivero/{reporte_id}/{photo_filename}"
+
+                if s3_client:
+                    try:
+                        photo_content = await photo.read()
+
+                        s3_client.upload_fileobj(
+                            io.BytesIO(photo_content),
+                            bucket_name,
+                            s3_key,
+                            ExtraArgs={
+                                'ContentType': photo.content_type
+                            }
+                        )
+
+                        photo_url = f"https://{bucket_name}.s3.amazonaws.com/{s3_key}"
+                        photos_urls.append(photo_url)
+
+                        await photo.seek(0)
+
+                    except ClientError as e:
+                        print(f"❌ Error subiendo foto a S3: {str(e)}")
+                        raise HTTPException(
+                            status_code=500,
+                            detail=f"Error subiendo foto '{photo.filename}' a S3: {str(e)}"
+                        )
+                else:
+                    photo_url = f"https://{bucket_name}.s3.amazonaws.com/{s3_key}"
+                    photos_urls.append(photo_url)
+                    print(f"⚠️ Modo desarrollo: URL ficticia generada para {photo.filename}")
+
+        # Preparar datos para guardar en Firebase
+        reporte_data = {
+            "id": reporte_id,
+            "tipo_intervencion": tipo_intervencion,
+            "tipos_plantas": tipos_plantas_dict,
+            "cantidad_total_plantas": cantidad_total_plantas,
+            "descripcion_intervencion": descripcion_intervencion,
+            "direccion": direccion,
+            "registrado_por": registrado_por,
+            "grupo": grupo,
+            "id_actividad": id_actividad,
+            "observaciones": observaciones or "",
+            "coordinates": geometry,
+            "comuna_corregimiento": comuna_corregimiento,
+            "barrio_vereda": barrio_vereda,
+            "photosUrl": photos_urls,
+            "photos_uploaded": len(photos_urls),
+            "timestamp": timestamp
+        }
+
+        # Guardar en Firebase
+        try:
+            db.collection('reportes_intervenciones_grupo_vivero').document(reporte_id).set(reporte_data)
+            print(f"✅ Reporte de intervención grupo vivero {reporte_id} guardado en Firebase")
+        except Exception as e:
+            print(f"❌ Error guardando en Firebase: {str(e)}")
+            if s3_client:
+                for photo_url in photos_urls:
+                    try:
+                        s3_key = photo_url.split('.com/')[-1]
+                        s3_client.delete_object(Bucket=bucket_name, Key=s3_key)
+                    except:
+                        pass
+            raise HTTPException(
+                status_code=500,
+                detail=f"Error guardando en Firebase: {str(e)}"
+            )
+
+        return ReconocimientoResponse(
+            success=True,
+            id=reporte_id,
+            message="Reporte de intervención del grupo vivero registrado exitosamente",
+            nombre_parque=None,
+            coordinates=geometry,
+            photosUrl=photos_urls,
+            photos_uploaded=len(photos_urls),
+            timestamp=timestamp
+        )
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Error registrando reporte de intervención del grupo vivero: {str(e)}"
+        )
+
+
+# ==================== ENDPOINT: Obtener Reportes de Intervención - Grupo Vivero ====================#
+@router.get(
+    "/grupo-vivero/reportes_intervenciones",
+    summary="🔵 GET | Obtener Reportes de Intervención del Grupo Vivero",
+    description="""
+## 🔵 GET | Obtener Reportes de Intervención del Grupo Vivero
+
+**Propósito**: Consultar reportes de intervención registrados por el grupo vivero desde Firebase.
+
+### 📥 Parámetros de Filtrado (opcionales)
+- **id**: Filtrar por ID específico del reporte (coincidencia exacta)
+- **id_actividad**: Filtrar por ID de actividad asociada (coincidencia exacta)
+- **grupo**: Filtrar por nombre del grupo operativo (coincidencia exacta)
+
+### 📝 Ejemplos de uso:
+```javascript
+// Obtener todos los reportes
+fetch('/grupo-vivero/reportes_intervenciones');
+
+// Filtrar por ID específico
+fetch('/grupo-vivero/reportes_intervenciones?id=abc-123-xyz');
+
+// Filtrar por ID de actividad
+fetch('/grupo-vivero/reportes_intervenciones?id_actividad=ACT-2026-1234');
+
+// Filtrar por grupo
+fetch('/grupo-vivero/reportes_intervenciones?grupo=Vivero Municipal');
+
+// Combinar filtros
+fetch('/grupo-vivero/reportes_intervenciones?id_actividad=ACT-2026-1234&grupo=Vivero Municipal');
+```
+
+### 📊 Estructura de datos retornados:
+```json
+{
+  "success": true,
+  "total": 5,
+  "data": [
+    {
+      "id": "uuid",
+      "tipo_intervencion": "Siembra",
+      "tipos_plantas": {"Guayacán": 10, "Ceiba": 5},
+      "cantidad_total_plantas": 15,
+      "descripcion_intervencion": "...",
+      "direccion": "Calle 5 #10-20",
+      "registrado_por": "Juan Pérez",
+      "grupo": "Vivero Municipal",
+      "id_actividad": "ACT-2026-1234",
+      "coordinates": {...},
+      "photosUrl": [...],
+      "timestamp": "2026-02-23T10:30:00-05:00"
+    }
+  ],
+  "filters": {
+    "id": null,
+    "id_actividad": "ACT-2026-1234",
+    "grupo": null
+  },
+  "timestamp": "2026-02-23T15:30:00Z"
+}
+```
+    """
+)
+async def get_reportes_intervenciones_grupo_vivero(
+    id: Optional[str] = Query(None, min_length=1, description="Filtrar por ID del reporte"),
+    id_actividad: Optional[str] = Query(None, min_length=1, description="Filtrar por ID de actividad"),
+    grupo: Optional[str] = Query(None, min_length=1, description="Filtrar por nombre del grupo")
+):
+    """
+    Obtener reportes de intervención del grupo vivero con filtros opcionales
+    """
+    try:
+        reportes_ref = db.collection('reportes_intervenciones_grupo_vivero')
+
+        # Si se proporciona un ID específico, buscar directamente
+        if id:
+            doc = reportes_ref.document(id).get()
+            if doc.exists:
+                data = doc.to_dict()
+                data['id'] = doc.id
+                return {
+                    "success": True,
+                    "total": 1,
+                    "data": [data],
+                    "filters": {
+                        "id": id,
+                        "id_actividad": id_actividad,
+                        "grupo": grupo
+                    },
+                    "timestamp": datetime.now(timezone.utc).isoformat()
+                }
+
+            # Fallback: buscar por campo interno 'id'
+            docs = reportes_ref.where("id", "==", id).stream()
+            reportes = []
+            for doc in docs:
+                data = doc.to_dict()
+                data['id'] = doc.id
+                reportes.append(data)
+
+            if not reportes:
+                return {
+                    "success": True,
+                    "total": 0,
+                    "data": [],
+                    "filters": {
+                        "id": id,
+                        "id_actividad": id_actividad,
+                        "grupo": grupo
+                    },
+                    "timestamp": datetime.now(timezone.utc).isoformat()
+                }
+
+            return {
+                "success": True,
+                "total": len(reportes),
+                "data": reportes,
+                "filters": {
+                    "id": id,
+                    "id_actividad": id_actividad,
+                    "grupo": grupo
+                },
+                "timestamp": datetime.now(timezone.utc).isoformat()
+            }
+
+        # Aplicar filtros opcionales
+        query = reportes_ref
+
+        if id_actividad:
+            query = query.where('id_actividad', '==', id_actividad.strip())
+
+        if grupo:
+            query = query.where('grupo', '==', grupo.strip())
+
+        # Obtener documentos
+        docs = query.stream()
+
+        reportes = []
+        for doc in docs:
+            data = doc.to_dict()
+            data['id'] = doc.id
+            reportes.append(data)
+
+        return {
+            "success": True,
+            "total": len(reportes),
+            "data": reportes,
+            "filters": {
+                "id": id,
+                "id_actividad": id_actividad.strip() if id_actividad else None,
+                "grupo": grupo.strip() if grupo else None
+            },
+            "timestamp": datetime.now(timezone.utc).isoformat()
+        }
+
+    except Exception as e:
+        print(f"❌ Error obteniendo reportes de intervención grupo vivero: {str(e)}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"Error obteniendo reportes de intervención del grupo vivero: {str(e)}"
+        )
+
+
+# ==================== ENDPOINT: Registrar Reporte de Intervención - Grupo Gobernanza ====================#
+@router.post(
+    "/grupo-gobernanza/reporte_intervencion",
+    summary="🟢 POST | Registrar Reporte de Intervención",
+    description="""
+## 🟢 POST | Registrar Reporte de Intervención del Grupo Gobernanza
+
+**Propósito**: Registrar un reporte de intervención realizado por el grupo gobernanza DAGMA,
+incluyendo captura de coordenadas GPS y subida de fotos a Amazon S3.
+
+### ✅ Campos disponibles:
+- **tipo_intervencion**: Tipo de intervención realizada
+- **unidades_impactadas**: Número de unidades impactadas (entero)
+- **descripcion_intervencion**: Descripción detallada de la intervención
+- **direccion**: Dirección donde se realizó la intervención
+- **registrado_por**: Persona que registra
+- **grupo**: Grupo operativo
+- **id_actividad**: ID de la actividad asociada
+- **observaciones**: Observaciones adicionales
+- **coordinates_type**: Tipo de geometría (Point, LineString, Polygon)
+- **coordinates_data**: Coordenadas GPS en formato JSON array
+- **photos**: Archivos de fotos (multipart/form-data)
+
+### 📸 Almacenamiento de Fotos:
+Las fotos se subirán al bucket **360-dagma-photos** en Amazon S3 con la siguiente estructura:
+```
+360-dagma-photos/
+└── reportes_intervenciones_grupo_gobernanza/
+    └── {id_reporte}/
+        └── {timestamp}_{filename}
+```
+
+### 📝 Ejemplo de uso con FormData:
+```javascript
+const formData = new FormData();
+formData.append('tipo_intervencion', 'Sensibilización ambiental');
+formData.append('unidades_impactadas', '25');
+formData.append('descripcion_intervencion', 'Taller de sensibilización en comunidad');
+formData.append('direccion', 'Calle 5 #10-20');
+formData.append('registrado_por', 'Juan Pérez');
+formData.append('grupo', 'Gobernanza Ambiental');
+formData.append('id_actividad', 'abc-123-xyz');
+formData.append('observaciones', 'Actividad completada');
+formData.append('coordinates_type', 'Point');
+formData.append('coordinates_data', '[-76.5225, 3.4516]');
+
+formData.append('photos', file1);
+formData.append('photos', file2);
+
+const response = await fetch('/grupo-gobernanza/reporte_intervencion', {
+    method: 'POST',
+    body: formData
+});
+```
+
+### ✅ Respuesta exitosa:
+```json
+{
+    "success": true,
+    "id": "uuid-generado",
+    "message": "Reporte de intervención del grupo gobernanza registrado exitosamente",
+    "coordinates": {
+        "type": "Point",
+        "coordinates": [-76.5225, 3.4516]
+    },
+    "photosUrl": [
+        "https://360-dagma-photos.s3.amazonaws.com/reportes_intervenciones_grupo_gobernanza/uuid/foto1.jpg"
+    ],
+    "photos_uploaded": 1,
+    "timestamp": "2026-02-23T10:30:00-05:00"
+}
+```
+    """,
+    response_model=ReconocimientoResponse
+)
+async def post_reporte_intervencion_grupo_gobernanza(
+    tipo_intervencion: Optional[str] = Form(None, description="Tipo de intervención"),
+    unidades_impactadas: Optional[int] = Form(None, description="Número de unidades impactadas"),
+    descripcion_intervencion: Optional[str] = Form(None, description="Descripción de la intervención"),
+    direccion: Optional[str] = Form(None, description="Dirección de la intervención"),
+    registrado_por: Optional[str] = Form(None, description="Persona que registra"),
+    grupo: Optional[str] = Form(None, description="Grupo operativo"),
+    id_actividad: Optional[str] = Form(None, description="ID de la actividad asociada"),
+    observaciones: Optional[str] = Form(None, description="Observaciones adicionales"),
+    coordinates_type: Optional[str] = Form(None, description="Tipo de geometría (Point, LineString, Polygon, etc.)"),
+    coordinates_data: Optional[str] = Form(None, description="Coordenadas en formato JSON array. Ejemplo: [-76.5225, 3.4516]"),
+    photos: Optional[List[UploadFile]] = File(None, description="Lista de archivos de fotos a subir a S3")
+):
+    """
+    Registrar un reporte de intervención del grupo gobernanza DAGMA
+    """
+    try:
+        # Validar tipo de geometría
+        valid_geometry_types = ["Point", "LineString", "Polygon", "MultiPoint", "MultiLineString", "MultiPolygon"]
+        if coordinates_type and coordinates_type not in valid_geometry_types:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Tipo de geometría inválido. Permitidos: {', '.join(valid_geometry_types)}"
+            )
+
+        # Validar cantidad de fotos
+        if photos is not None and len(photos) > 10:
+            raise HTTPException(
+                status_code=400,
+                detail="Máximo 10 fotos por reporte de intervención"
+            )
+
+        # Validar cada foto
+        if photos:
+            for photo in photos:
+                try:
+                    validate_photo_file(photo)
+                except ValueError as e:
+                    raise HTTPException(
+                        status_code=400,
+                        detail=f"Error en archivo '{photo.filename}': {str(e)}"
+                    )
+
+        # Generar ID único para el reporte
+        reporte_id = str(uuid.uuid4())
+
+        # Timestamp con zona horaria de Colombia
+        tz_col = pytz.timezone("America/Bogota")
+        timestamp = datetime.now(tz_col).isoformat()
+
+        # Parsear y validar coordenadas
+        geometry = None
+        coordinates = None
+        comuna_corregimiento = None
+        barrio_vereda = None
+
+        if coordinates_data and coordinates_type:
+            try:
+                print(f"📍 Recibido coordinates_data: {repr(coordinates_data)}")
+
+                coordinates_str = coordinates_data.strip()
+
+                if not coordinates_str.startswith('['):
+                    parts = coordinates_str.split(',')
+                    if len(parts) == 2:
+                        try:
+                            lon = float(parts[0].strip())
+                            lat = float(parts[1].strip())
+                            coordinates = [lon, lat]
+                        except ValueError:
+                            raise json.JSONDecodeError("Formato inválido", coordinates_str, 0)
+                    else:
+                        raise json.JSONDecodeError("Debe tener formato [lon,lat]", coordinates_str, 0)
+                else:
+                    coordinates = json.loads(coordinates_str)
+
+                validate_coordinates(coordinates, coordinates_type)
+
+                geometry = {
+                    "type": coordinates_type,
+                    "coordinates": coordinates
+                }
+
+                if coordinates_type == "Point":
+                    try:
+                        comuna_corregimiento, barrio_vereda = get_location_from_coordinates(coordinates)
+                        if comuna_corregimiento:
+                            print(f"✅ Comuna/Corregimiento encontrada: {comuna_corregimiento}")
+                        if barrio_vereda:
+                            print(f"✅ Barrio/Vereda encontrado: {barrio_vereda}")
+                    except Exception as e:
+                        print(f"⚠️ Error obteniendo ubicación: {str(e)}")
+                else:
+                    print(f"ℹ️ La geolocalización solo es disponible para geometría Point, se capturó {coordinates_type}")
+
+            except json.JSONDecodeError as e:
+                print(f"❌ Error JSON: {str(e)}")
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Formato de coordenadas inválido. Envíe como '[lon,lat]' (ej: '[-76.5225,3.4516]') o 'lon,lat' (ej: '-76.5225,3.4516'). Recibido: '{coordinates_data}'"
+                )
+            except ValueError as e:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Error en coordenadas: {str(e)}"
+                )
+
+        # Obtener cliente S3 y bucket name
+        bucket_name = os.getenv('S3_BUCKET_NAME', '360-dagma-photos')
+
+        # Subir fotos a S3
+        photos_urls = []
+        s3_client = None
+
+        if photos:
+            try:
+                s3_client = get_s3_client()
+            except ValueError as e:
+                print(f"⚠️ ADVERTENCIA: {str(e)}. Las fotos NO se subirán a S3.")
+
+            for i, photo in enumerate(photos):
+                ts_photo = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
+                safe_filename = "".join(c for c in photo.filename if c.isalnum() or c in "._-")
+                photo_filename = f"{ts_photo}_{i}_{safe_filename}"
+
+                s3_key = f"reportes_intervenciones_grupo_gobernanza/{reporte_id}/{photo_filename}"
+
+                if s3_client:
+                    try:
+                        photo_content = await photo.read()
+
+                        s3_client.upload_fileobj(
+                            io.BytesIO(photo_content),
+                            bucket_name,
+                            s3_key,
+                            ExtraArgs={
+                                'ContentType': photo.content_type
+                            }
+                        )
+
+                        photo_url = f"https://{bucket_name}.s3.amazonaws.com/{s3_key}"
+                        photos_urls.append(photo_url)
+
+                        await photo.seek(0)
+
+                    except ClientError as e:
+                        print(f"❌ Error subiendo foto a S3: {str(e)}")
+                        raise HTTPException(
+                            status_code=500,
+                            detail=f"Error subiendo foto '{photo.filename}' a S3: {str(e)}"
+                        )
+                else:
+                    photo_url = f"https://{bucket_name}.s3.amazonaws.com/{s3_key}"
+                    photos_urls.append(photo_url)
+                    print(f"⚠️ Modo desarrollo: URL ficticia generada para {photo.filename}")
+
+        # Preparar datos para guardar en Firebase
+        reporte_data = {
+            "id": reporte_id,
+            "tipo_intervencion": tipo_intervencion,
+            "unidades_impactadas": unidades_impactadas,
+            "descripcion_intervencion": descripcion_intervencion,
+            "direccion": direccion,
+            "registrado_por": registrado_por,
+            "grupo": grupo,
+            "id_actividad": id_actividad,
+            "observaciones": observaciones or "",
+            "coordinates": geometry,
+            "comuna_corregimiento": comuna_corregimiento,
+            "barrio_vereda": barrio_vereda,
+            "photosUrl": photos_urls,
+            "photos_uploaded": len(photos_urls),
+            "timestamp": timestamp
+        }
+
+        # Guardar en Firebase
+        try:
+            db.collection('reportes_intervenciones_grupo_gobernanza').document(reporte_id).set(reporte_data)
+            print(f"✅ Reporte de intervención grupo gobernanza {reporte_id} guardado en Firebase")
+        except Exception as e:
+            print(f"❌ Error guardando en Firebase: {str(e)}")
+            if s3_client:
+                for photo_url in photos_urls:
+                    try:
+                        s3_key = photo_url.split('.com/')[-1]
+                        s3_client.delete_object(Bucket=bucket_name, Key=s3_key)
+                    except:
+                        pass
+            raise HTTPException(
+                status_code=500,
+                detail=f"Error guardando en Firebase: {str(e)}"
+            )
+
+        return ReconocimientoResponse(
+            success=True,
+            id=reporte_id,
+            message="Reporte de intervención del grupo gobernanza registrado exitosamente",
+            nombre_parque=None,
+            coordinates=geometry,
+            photosUrl=photos_urls,
+            photos_uploaded=len(photos_urls),
+            timestamp=timestamp
+        )
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Error registrando reporte de intervención del grupo gobernanza: {str(e)}"
+        )
+
+
+# ==================== ENDPOINT: Obtener Reportes de Intervención - Grupo Gobernanza ====================#
+@router.get(
+    "/grupo-gobernanza/reportes_intervenciones",
+    summary="🔵 GET | Obtener Reportes de Intervención del Grupo Gobernanza",
+    description="""
+## 🔵 GET | Obtener Reportes de Intervención del Grupo Gobernanza
+
+**Propósito**: Consultar reportes de intervención registrados por el grupo gobernanza desde Firebase.
+
+### 📥 Parámetros de Filtrado (opcionales)
+- **id**: Filtrar por ID específico del reporte (coincidencia exacta)
+- **id_actividad**: Filtrar por ID de actividad asociada (coincidencia exacta)
+- **grupo**: Filtrar por nombre del grupo operativo (coincidencia exacta)
+
+### 📝 Ejemplos de uso:
+```javascript
+// Obtener todos los reportes
+fetch('/grupo-gobernanza/reportes_intervenciones');
+
+// Filtrar por ID específico
+fetch('/grupo-gobernanza/reportes_intervenciones?id=abc-123-xyz');
+
+// Filtrar por ID de actividad
+fetch('/grupo-gobernanza/reportes_intervenciones?id_actividad=ACT-2026-1234');
+
+// Filtrar por grupo
+fetch('/grupo-gobernanza/reportes_intervenciones?grupo=Gobernanza Ambiental');
+
+// Combinar filtros
+fetch('/grupo-gobernanza/reportes_intervenciones?id_actividad=ACT-2026-1234&grupo=Gobernanza Ambiental');
+```
+
+### 📊 Estructura de datos retornados:
+```json
+{
+  "success": true,
+  "total": 5,
+  "data": [
+    {
+      "id": "uuid",
+      "tipo_intervencion": "Sensibilización ambiental",
+      "unidades_impactadas": 25,
+      "descripcion_intervencion": "...",
+      "direccion": "Calle 5 #10-20",
+      "registrado_por": "Juan Pérez",
+      "grupo": "Gobernanza Ambiental",
+      "id_actividad": "ACT-2026-1234",
+      "coordinates": {...},
+      "photosUrl": [...],
+      "timestamp": "2026-02-23T10:30:00-05:00"
+    }
+  ],
+  "filters": {
+    "id": null,
+    "id_actividad": "ACT-2026-1234",
+    "grupo": null
+  },
+  "timestamp": "2026-02-23T15:30:00Z"
+}
+```
+    """
+)
+async def get_reportes_intervenciones_grupo_gobernanza(
+    id: Optional[str] = Query(None, min_length=1, description="Filtrar por ID del reporte"),
+    id_actividad: Optional[str] = Query(None, min_length=1, description="Filtrar por ID de actividad"),
+    grupo: Optional[str] = Query(None, min_length=1, description="Filtrar por nombre del grupo")
+):
+    """
+    Obtener reportes de intervención del grupo gobernanza con filtros opcionales
+    """
+    try:
+        reportes_ref = db.collection('reportes_intervenciones_grupo_gobernanza')
+
+        # Si se proporciona un ID específico, buscar directamente
+        if id:
+            doc = reportes_ref.document(id).get()
+            if doc.exists:
+                data = doc.to_dict()
+                data['id'] = doc.id
+                return {
+                    "success": True,
+                    "total": 1,
+                    "data": [data],
+                    "filters": {
+                        "id": id,
+                        "id_actividad": id_actividad,
+                        "grupo": grupo
+                    },
+                    "timestamp": datetime.now(timezone.utc).isoformat()
+                }
+
+            # Fallback: buscar por campo interno 'id'
+            docs = reportes_ref.where("id", "==", id).stream()
+            reportes = []
+            for doc in docs:
+                data = doc.to_dict()
+                data['id'] = doc.id
+                reportes.append(data)
+
+            if not reportes:
+                return {
+                    "success": True,
+                    "total": 0,
+                    "data": [],
+                    "filters": {
+                        "id": id,
+                        "id_actividad": id_actividad,
+                        "grupo": grupo
+                    },
+                    "timestamp": datetime.now(timezone.utc).isoformat()
+                }
+
+            return {
+                "success": True,
+                "total": len(reportes),
+                "data": reportes,
+                "filters": {
+                    "id": id,
+                    "id_actividad": id_actividad,
+                    "grupo": grupo
+                },
+                "timestamp": datetime.now(timezone.utc).isoformat()
+            }
+
+        # Aplicar filtros opcionales
+        query = reportes_ref
+
+        if id_actividad:
+            query = query.where('id_actividad', '==', id_actividad.strip())
+
+        if grupo:
+            query = query.where('grupo', '==', grupo.strip())
+
+        # Obtener documentos
+        docs = query.stream()
+
+        reportes = []
+        for doc in docs:
+            data = doc.to_dict()
+            data['id'] = doc.id
+            reportes.append(data)
+
+        return {
+            "success": True,
+            "total": len(reportes),
+            "data": reportes,
+            "filters": {
+                "id": id,
+                "id_actividad": id_actividad.strip() if id_actividad else None,
+                "grupo": grupo.strip() if grupo else None
+            },
+            "timestamp": datetime.now(timezone.utc).isoformat()
+        }
+
+    except Exception as e:
+        print(f"❌ Error obteniendo reportes de intervención grupo gobernanza: {str(e)}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"Error obteniendo reportes de intervención del grupo gobernanza: {str(e)}"
+        )
+
+
+# ==================== ENDPOINT: Registrar Reporte de Intervención - Grupo Ecosistemas ====================#
+@router.post(
+    "/grupo-ecosistemas/reporte_intervencion",
+    summary="🟢 POST | Registrar Reporte de Intervención",
+    description="""
+## 🟢 POST | Registrar Reporte de Intervención del Grupo Ecosistemas
+
+**Propósito**: Registrar un reporte de intervención realizado por el grupo ecosistemas DAGMA,
+incluyendo captura de coordenadas GPS y subida de fotos a Amazon S3.
+
+### ✅ Campos disponibles:
+- **tipo_intervencion**: Tipo de intervención realizada
+- **unidad_medida**: Unidad de medida utilizada (ej: m², hectáreas, individuos, etc.)
+- **unidades_impactadas**: Número de unidades impactadas (entero)
+- **descripcion_intervencion**: Descripción detallada de la intervención
+- **direccion**: Dirección donde se realizó la intervención
+- **registrado_por**: Persona que registra
+- **grupo**: Grupo operativo
+- **id_actividad**: ID de la actividad asociada
+- **observaciones**: Observaciones adicionales
+- **coordinates_type**: Tipo de geometría (Point, LineString, Polygon)
+- **coordinates_data**: Coordenadas GPS en formato JSON array
+- **photos**: Archivos de fotos (multipart/form-data)
+
+### 📸 Almacenamiento de Fotos:
+```
+360-dagma-photos/
+└── reportes_intervenciones_grupo_ecosistemas/
+    └── {id_reporte}/
+        └── {timestamp}_{filename}
+```
+
+### 📝 Ejemplo de uso con FormData:
+```javascript
+const formData = new FormData();
+formData.append('tipo_intervencion', 'Restauración ecológica');
+formData.append('unidad_medida', 'hectáreas');
+formData.append('unidades_impactadas', '5');
+formData.append('descripcion_intervencion', 'Restauración de humedal');
+formData.append('direccion', 'Calle 5 #10-20');
+formData.append('registrado_por', 'Juan Pérez');
+formData.append('grupo', 'Ecosistemas');
+formData.append('id_actividad', 'abc-123-xyz');
+formData.append('observaciones', 'Actividad completada');
+formData.append('coordinates_type', 'Point');
+formData.append('coordinates_data', '[-76.5225, 3.4516]');
+
+formData.append('photos', file1);
+
+const response = await fetch('/grupo-ecosistemas/reporte_intervencion', {
+    method: 'POST',
+    body: formData
+});
+```
+
+### ✅ Respuesta exitosa:
+```json
+{
+    "success": true,
+    "id": "uuid-generado",
+    "message": "Reporte de intervención del grupo ecosistemas registrado exitosamente",
+    "coordinates": {
+        "type": "Point",
+        "coordinates": [-76.5225, 3.4516]
+    },
+    "photosUrl": [...],
+    "photos_uploaded": 1,
+    "timestamp": "2026-02-23T10:30:00-05:00"
+}
+```
+    """,
+    response_model=ReconocimientoResponse
+)
+async def post_reporte_intervencion_grupo_ecosistemas(
+    tipo_intervencion: Optional[str] = Form(None, description="Tipo de intervención"),
+    unidad_medida: Optional[str] = Form(None, description="Unidad de medida (ej: m², hectáreas, individuos)"),
+    unidades_impactadas: Optional[int] = Form(None, description="Número de unidades impactadas"),
+    descripcion_intervencion: Optional[str] = Form(None, description="Descripción de la intervención"),
+    direccion: Optional[str] = Form(None, description="Dirección de la intervención"),
+    registrado_por: Optional[str] = Form(None, description="Persona que registra"),
+    grupo: Optional[str] = Form(None, description="Grupo operativo"),
+    id_actividad: Optional[str] = Form(None, description="ID de la actividad asociada"),
+    observaciones: Optional[str] = Form(None, description="Observaciones adicionales"),
+    coordinates_type: Optional[str] = Form(None, description="Tipo de geometría (Point, LineString, Polygon, etc.)"),
+    coordinates_data: Optional[str] = Form(None, description="Coordenadas en formato JSON array. Ejemplo: [-76.5225, 3.4516]"),
+    photos: Optional[List[UploadFile]] = File(None, description="Lista de archivos de fotos a subir a S3")
+):
+    """
+    Registrar un reporte de intervención del grupo ecosistemas DAGMA
+    """
+    try:
+        # Validar tipo de geometría
+        valid_geometry_types = ["Point", "LineString", "Polygon", "MultiPoint", "MultiLineString", "MultiPolygon"]
+        if coordinates_type and coordinates_type not in valid_geometry_types:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Tipo de geometría inválido. Permitidos: {', '.join(valid_geometry_types)}"
+            )
+
+        # Validar cantidad de fotos
+        if photos is not None and len(photos) > 10:
+            raise HTTPException(
+                status_code=400,
+                detail="Máximo 10 fotos por reporte de intervención"
+            )
+
+        # Validar cada foto
+        if photos:
+            for photo in photos:
+                try:
+                    validate_photo_file(photo)
+                except ValueError as e:
+                    raise HTTPException(
+                        status_code=400,
+                        detail=f"Error en archivo '{photo.filename}': {str(e)}"
+                    )
+
+        # Generar ID único para el reporte
+        reporte_id = str(uuid.uuid4())
+
+        # Timestamp con zona horaria de Colombia
+        tz_col = pytz.timezone("America/Bogota")
+        timestamp = datetime.now(tz_col).isoformat()
+
+        # Parsear y validar coordenadas
+        geometry = None
+        coordinates = None
+        comuna_corregimiento = None
+        barrio_vereda = None
+
+        if coordinates_data and coordinates_type:
+            try:
+                print(f"📍 Recibido coordinates_data: {repr(coordinates_data)}")
+
+                coordinates_str = coordinates_data.strip()
+
+                if not coordinates_str.startswith('['):
+                    parts = coordinates_str.split(',')
+                    if len(parts) == 2:
+                        try:
+                            lon = float(parts[0].strip())
+                            lat = float(parts[1].strip())
+                            coordinates = [lon, lat]
+                        except ValueError:
+                            raise json.JSONDecodeError("Formato inválido", coordinates_str, 0)
+                    else:
+                        raise json.JSONDecodeError("Debe tener formato [lon,lat]", coordinates_str, 0)
+                else:
+                    coordinates = json.loads(coordinates_str)
+
+                validate_coordinates(coordinates, coordinates_type)
+
+                geometry = {
+                    "type": coordinates_type,
+                    "coordinates": coordinates
+                }
+
+                if coordinates_type == "Point":
+                    try:
+                        comuna_corregimiento, barrio_vereda = get_location_from_coordinates(coordinates)
+                        if comuna_corregimiento:
+                            print(f"✅ Comuna/Corregimiento encontrada: {comuna_corregimiento}")
+                        if barrio_vereda:
+                            print(f"✅ Barrio/Vereda encontrado: {barrio_vereda}")
+                    except Exception as e:
+                        print(f"⚠️ Error obteniendo ubicación: {str(e)}")
+                else:
+                    print(f"ℹ️ La geolocalización solo es disponible para geometría Point, se capturó {coordinates_type}")
+
+            except json.JSONDecodeError as e:
+                print(f"❌ Error JSON: {str(e)}")
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Formato de coordenadas inválido. Envíe como '[lon,lat]' (ej: '[-76.5225,3.4516]') o 'lon,lat' (ej: '-76.5225,3.4516'). Recibido: '{coordinates_data}'"
+                )
+            except ValueError as e:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Error en coordenadas: {str(e)}"
+                )
+
+        # Obtener cliente S3 y bucket name
+        bucket_name = os.getenv('S3_BUCKET_NAME', '360-dagma-photos')
+
+        # Subir fotos a S3
+        photos_urls = []
+        s3_client = None
+
+        if photos:
+            try:
+                s3_client = get_s3_client()
+            except ValueError as e:
+                print(f"⚠️ ADVERTENCIA: {str(e)}. Las fotos NO se subirán a S3.")
+
+            for i, photo in enumerate(photos):
+                ts_photo = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
+                safe_filename = "".join(c for c in photo.filename if c.isalnum() or c in "._-")
+                photo_filename = f"{ts_photo}_{i}_{safe_filename}"
+
+                s3_key = f"reportes_intervenciones_grupo_ecosistemas/{reporte_id}/{photo_filename}"
+
+                if s3_client:
+                    try:
+                        photo_content = await photo.read()
+
+                        s3_client.upload_fileobj(
+                            io.BytesIO(photo_content),
+                            bucket_name,
+                            s3_key,
+                            ExtraArgs={
+                                'ContentType': photo.content_type
+                            }
+                        )
+
+                        photo_url = f"https://{bucket_name}.s3.amazonaws.com/{s3_key}"
+                        photos_urls.append(photo_url)
+
+                        await photo.seek(0)
+
+                    except ClientError as e:
+                        print(f"❌ Error subiendo foto a S3: {str(e)}")
+                        raise HTTPException(
+                            status_code=500,
+                            detail=f"Error subiendo foto '{photo.filename}' a S3: {str(e)}"
+                        )
+                else:
+                    photo_url = f"https://{bucket_name}.s3.amazonaws.com/{s3_key}"
+                    photos_urls.append(photo_url)
+                    print(f"⚠️ Modo desarrollo: URL ficticia generada para {photo.filename}")
+
+        # Preparar datos para guardar en Firebase
+        reporte_data = {
+            "id": reporte_id,
+            "tipo_intervencion": tipo_intervencion,
+            "unidad_medida": unidad_medida,
+            "unidades_impactadas": unidades_impactadas,
+            "descripcion_intervencion": descripcion_intervencion,
+            "direccion": direccion,
+            "registrado_por": registrado_por,
+            "grupo": grupo,
+            "id_actividad": id_actividad,
+            "observaciones": observaciones or "",
+            "coordinates": geometry,
+            "comuna_corregimiento": comuna_corregimiento,
+            "barrio_vereda": barrio_vereda,
+            "photosUrl": photos_urls,
+            "photos_uploaded": len(photos_urls),
+            "timestamp": timestamp
+        }
+
+        # Guardar en Firebase
+        try:
+            db.collection('reportes_intervenciones_grupo_ecosistemas').document(reporte_id).set(reporte_data)
+            print(f"✅ Reporte de intervención grupo ecosistemas {reporte_id} guardado en Firebase")
+        except Exception as e:
+            print(f"❌ Error guardando en Firebase: {str(e)}")
+            if s3_client:
+                for photo_url in photos_urls:
+                    try:
+                        s3_key = photo_url.split('.com/')[-1]
+                        s3_client.delete_object(Bucket=bucket_name, Key=s3_key)
+                    except:
+                        pass
+            raise HTTPException(
+                status_code=500,
+                detail=f"Error guardando en Firebase: {str(e)}"
+            )
+
+        return ReconocimientoResponse(
+            success=True,
+            id=reporte_id,
+            message="Reporte de intervención del grupo ecosistemas registrado exitosamente",
+            nombre_parque=None,
+            coordinates=geometry,
+            photosUrl=photos_urls,
+            photos_uploaded=len(photos_urls),
+            timestamp=timestamp
+        )
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Error registrando reporte de intervención del grupo ecosistemas: {str(e)}"
+        )
+
+
+# ==================== ENDPOINT: Obtener Reportes de Intervención - Grupo Ecosistemas ====================#
+@router.get(
+    "/grupo-ecosistemas/reportes_intervenciones",
+    summary="🔵 GET | Obtener Reportes de Intervención del Grupo Ecosistemas",
+    description="""
+## 🔵 GET | Obtener Reportes de Intervención del Grupo Ecosistemas
+
+**Propósito**: Consultar reportes de intervención registrados por el grupo ecosistemas desde Firebase.
+
+### 📥 Parámetros de Filtrado (opcionales)
+- **id**: Filtrar por ID específico del reporte (coincidencia exacta)
+- **id_actividad**: Filtrar por ID de actividad asociada (coincidencia exacta)
+- **grupo**: Filtrar por nombre del grupo operativo (coincidencia exacta)
+
+### 📝 Ejemplos de uso:
+```javascript
+// Obtener todos los reportes
+fetch('/grupo-ecosistemas/reportes_intervenciones');
+
+// Filtrar por ID específico
+fetch('/grupo-ecosistemas/reportes_intervenciones?id=abc-123-xyz');
+
+// Filtrar por ID de actividad
+fetch('/grupo-ecosistemas/reportes_intervenciones?id_actividad=ACT-2026-1234');
+
+// Filtrar por grupo
+fetch('/grupo-ecosistemas/reportes_intervenciones?grupo=Ecosistemas');
+
+// Combinar filtros
+fetch('/grupo-ecosistemas/reportes_intervenciones?id_actividad=ACT-2026-1234&grupo=Ecosistemas');
+```
+
+### 📊 Estructura de datos retornados:
+```json
+{
+  "success": true,
+  "total": 5,
+  "data": [
+    {
+      "id": "uuid",
+      "tipo_intervencion": "Restauración ecológica",
+      "unidad_medida": "hectáreas",
+      "unidades_impactadas": 5,
+      "descripcion_intervencion": "...",
+      "direccion": "Calle 5 #10-20",
+      "registrado_por": "Juan Pérez",
+      "grupo": "Ecosistemas",
+      "id_actividad": "ACT-2026-1234",
+      "coordinates": {...},
+      "photosUrl": [...],
+      "timestamp": "2026-02-23T10:30:00-05:00"
+    }
+  ],
+  "filters": {
+    "id": null,
+    "id_actividad": "ACT-2026-1234",
+    "grupo": null
+  },
+  "timestamp": "2026-02-23T15:30:00Z"
+}
+```
+    """
+)
+async def get_reportes_intervenciones_grupo_ecosistemas(
+    id: Optional[str] = Query(None, min_length=1, description="Filtrar por ID del reporte"),
+    id_actividad: Optional[str] = Query(None, min_length=1, description="Filtrar por ID de actividad"),
+    grupo: Optional[str] = Query(None, min_length=1, description="Filtrar por nombre del grupo")
+):
+    """
+    Obtener reportes de intervención del grupo ecosistemas con filtros opcionales
+    """
+    try:
+        reportes_ref = db.collection('reportes_intervenciones_grupo_ecosistemas')
+
+        if id:
+            doc = reportes_ref.document(id).get()
+            if doc.exists:
+                data = doc.to_dict()
+                data['id'] = doc.id
+                return {
+                    "success": True,
+                    "total": 1,
+                    "data": [data],
+                    "filters": {
+                        "id": id,
+                        "id_actividad": id_actividad,
+                        "grupo": grupo
+                    },
+                    "timestamp": datetime.now(timezone.utc).isoformat()
+                }
+
+            docs = reportes_ref.where("id", "==", id).stream()
+            reportes = []
+            for doc in docs:
+                data = doc.to_dict()
+                data['id'] = doc.id
+                reportes.append(data)
+
+            if not reportes:
+                return {
+                    "success": True,
+                    "total": 0,
+                    "data": [],
+                    "filters": {
+                        "id": id,
+                        "id_actividad": id_actividad,
+                        "grupo": grupo
+                    },
+                    "timestamp": datetime.now(timezone.utc).isoformat()
+                }
+
+            return {
+                "success": True,
+                "total": len(reportes),
+                "data": reportes,
+                "filters": {
+                    "id": id,
+                    "id_actividad": id_actividad,
+                    "grupo": grupo
+                },
+                "timestamp": datetime.now(timezone.utc).isoformat()
+            }
+
+        query = reportes_ref
+
+        if id_actividad:
+            query = query.where('id_actividad', '==', id_actividad.strip())
+
+        if grupo:
+            query = query.where('grupo', '==', grupo.strip())
+
+        docs = query.stream()
+
+        reportes = []
+        for doc in docs:
+            data = doc.to_dict()
+            data['id'] = doc.id
+            reportes.append(data)
+
+        return {
+            "success": True,
+            "total": len(reportes),
+            "data": reportes,
+            "filters": {
+                "id": id,
+                "id_actividad": id_actividad.strip() if id_actividad else None,
+                "grupo": grupo.strip() if grupo else None
+            },
+            "timestamp": datetime.now(timezone.utc).isoformat()
+        }
+
+    except Exception as e:
+        print(f"❌ Error obteniendo reportes de intervención grupo ecosistemas: {str(e)}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"Error obteniendo reportes de intervención del grupo ecosistemas: {str(e)}"
+        )
+
+
+# ==================== ENDPOINT: Registrar Reporte de Intervención - Grupo UMATA ====================#
+@router.post(
+    "/grupo-umata/reporte_intervencion",
+    summary="🟢 POST | Registrar Reporte de Intervención",
+    description="""
+## 🟢 POST | Registrar Reporte de Intervención del Grupo UMATA
+
+**Propósito**: Registrar un reporte de intervención realizado por el grupo UMATA DAGMA,
+incluyendo captura de coordenadas GPS y subida de fotos a Amazon S3.
+
+### ✅ Campos disponibles:
+- **tipo_intervencion**: Tipo de intervención realizada
+- **unidades_impactadas**: Número de unidades impactadas (entero)
+- **descripcion_intervencion**: Descripción detallada de la intervención
+- **direccion**: Dirección donde se realizó la intervención
+- **registrado_por**: Persona que registra
+- **grupo**: Grupo operativo
+- **id_actividad**: ID de la actividad asociada
+- **observaciones**: Observaciones adicionales
+- **coordinates_type**: Tipo de geometría (Point, LineString, Polygon)
+- **coordinates_data**: Coordenadas GPS en formato JSON array
+- **photos**: Archivos de fotos (multipart/form-data)
+
+### 📸 Almacenamiento de Fotos:
+```
+360-dagma-photos/
+└── reportes_intervenciones_grupo_umata/
+    └── {id_reporte}/
+        └── {timestamp}_{filename}
+```
+
+### 📝 Ejemplo de uso con FormData:
+```javascript
+const formData = new FormData();
+formData.append('tipo_intervencion', 'Asistencia técnica agropecuaria');
+formData.append('unidades_impactadas', '15');
+formData.append('descripcion_intervencion', 'Asistencia a productores rurales');
+formData.append('direccion', 'Vereda El Saladito');
+formData.append('registrado_por', 'Juan Pérez');
+formData.append('grupo', 'UMATA');
+formData.append('id_actividad', 'abc-123-xyz');
+formData.append('observaciones', 'Actividad completada');
+formData.append('coordinates_type', 'Point');
+formData.append('coordinates_data', '[-76.5225, 3.4516]');
+
+formData.append('photos', file1);
+
+const response = await fetch('/grupo-umata/reporte_intervencion', {
+    method: 'POST',
+    body: formData
+});
+```
+
+### ✅ Respuesta exitosa:
+```json
+{
+    "success": true,
+    "id": "uuid-generado",
+    "message": "Reporte de intervención del grupo UMATA registrado exitosamente",
+    "coordinates": {
+        "type": "Point",
+        "coordinates": [-76.5225, 3.4516]
+    },
+    "photosUrl": [...],
+    "photos_uploaded": 1,
+    "timestamp": "2026-02-23T10:30:00-05:00"
+}
+```
+    """,
+    response_model=ReconocimientoResponse
+)
+async def post_reporte_intervencion_grupo_umata(
+    tipo_intervencion: Optional[str] = Form(None, description="Tipo de intervención"),
+    unidades_impactadas: Optional[int] = Form(None, description="Número de unidades impactadas"),
+    descripcion_intervencion: Optional[str] = Form(None, description="Descripción de la intervención"),
+    direccion: Optional[str] = Form(None, description="Dirección de la intervención"),
+    registrado_por: Optional[str] = Form(None, description="Persona que registra"),
+    grupo: Optional[str] = Form(None, description="Grupo operativo"),
+    id_actividad: Optional[str] = Form(None, description="ID de la actividad asociada"),
+    observaciones: Optional[str] = Form(None, description="Observaciones adicionales"),
+    coordinates_type: Optional[str] = Form(None, description="Tipo de geometría (Point, LineString, Polygon, etc.)"),
+    coordinates_data: Optional[str] = Form(None, description="Coordenadas en formato JSON array. Ejemplo: [-76.5225, 3.4516]"),
+    photos: Optional[List[UploadFile]] = File(None, description="Lista de archivos de fotos a subir a S3")
+):
+    """
+    Registrar un reporte de intervención del grupo UMATA DAGMA
+    """
+    try:
+        # Validar tipo de geometría
+        valid_geometry_types = ["Point", "LineString", "Polygon", "MultiPoint", "MultiLineString", "MultiPolygon"]
+        if coordinates_type and coordinates_type not in valid_geometry_types:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Tipo de geometría inválido. Permitidos: {', '.join(valid_geometry_types)}"
+            )
+
+        # Validar cantidad de fotos
+        if photos is not None and len(photos) > 10:
+            raise HTTPException(
+                status_code=400,
+                detail="Máximo 10 fotos por reporte de intervención"
+            )
+
+        # Validar cada foto
+        if photos:
+            for photo in photos:
+                try:
+                    validate_photo_file(photo)
+                except ValueError as e:
+                    raise HTTPException(
+                        status_code=400,
+                        detail=f"Error en archivo '{photo.filename}': {str(e)}"
+                    )
+
+        # Generar ID único para el reporte
+        reporte_id = str(uuid.uuid4())
+
+        # Timestamp con zona horaria de Colombia
+        tz_col = pytz.timezone("America/Bogota")
+        timestamp = datetime.now(tz_col).isoformat()
+
+        # Parsear y validar coordenadas
+        geometry = None
+        coordinates = None
+        comuna_corregimiento = None
+        barrio_vereda = None
+
+        if coordinates_data and coordinates_type:
+            try:
+                print(f"📍 Recibido coordinates_data: {repr(coordinates_data)}")
+
+                coordinates_str = coordinates_data.strip()
+
+                if not coordinates_str.startswith('['):
+                    parts = coordinates_str.split(',')
+                    if len(parts) == 2:
+                        try:
+                            lon = float(parts[0].strip())
+                            lat = float(parts[1].strip())
+                            coordinates = [lon, lat]
+                        except ValueError:
+                            raise json.JSONDecodeError("Formato inválido", coordinates_str, 0)
+                    else:
+                        raise json.JSONDecodeError("Debe tener formato [lon,lat]", coordinates_str, 0)
+                else:
+                    coordinates = json.loads(coordinates_str)
+
+                validate_coordinates(coordinates, coordinates_type)
+
+                geometry = {
+                    "type": coordinates_type,
+                    "coordinates": coordinates
+                }
+
+                if coordinates_type == "Point":
+                    try:
+                        comuna_corregimiento, barrio_vereda = get_location_from_coordinates(coordinates)
+                        if comuna_corregimiento:
+                            print(f"✅ Comuna/Corregimiento encontrada: {comuna_corregimiento}")
+                        if barrio_vereda:
+                            print(f"✅ Barrio/Vereda encontrado: {barrio_vereda}")
+                    except Exception as e:
+                        print(f"⚠️ Error obteniendo ubicación: {str(e)}")
+                else:
+                    print(f"ℹ️ La geolocalización solo es disponible para geometría Point, se capturó {coordinates_type}")
+
+            except json.JSONDecodeError as e:
+                print(f"❌ Error JSON: {str(e)}")
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Formato de coordenadas inválido. Envíe como '[lon,lat]' (ej: '[-76.5225,3.4516]') o 'lon,lat' (ej: '-76.5225,3.4516'). Recibido: '{coordinates_data}'"
+                )
+            except ValueError as e:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Error en coordenadas: {str(e)}"
+                )
+
+        # Obtener cliente S3 y bucket name
+        bucket_name = os.getenv('S3_BUCKET_NAME', '360-dagma-photos')
+
+        # Subir fotos a S3
+        photos_urls = []
+        s3_client = None
+
+        if photos:
+            try:
+                s3_client = get_s3_client()
+            except ValueError as e:
+                print(f"⚠️ ADVERTENCIA: {str(e)}. Las fotos NO se subirán a S3.")
+
+            for i, photo in enumerate(photos):
+                ts_photo = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
+                safe_filename = "".join(c for c in photo.filename if c.isalnum() or c in "._-")
+                photo_filename = f"{ts_photo}_{i}_{safe_filename}"
+
+                s3_key = f"reportes_intervenciones_grupo_umata/{reporte_id}/{photo_filename}"
+
+                if s3_client:
+                    try:
+                        photo_content = await photo.read()
+
+                        s3_client.upload_fileobj(
+                            io.BytesIO(photo_content),
+                            bucket_name,
+                            s3_key,
+                            ExtraArgs={
+                                'ContentType': photo.content_type
+                            }
+                        )
+
+                        photo_url = f"https://{bucket_name}.s3.amazonaws.com/{s3_key}"
+                        photos_urls.append(photo_url)
+
+                        await photo.seek(0)
+
+                    except ClientError as e:
+                        print(f"❌ Error subiendo foto a S3: {str(e)}")
+                        raise HTTPException(
+                            status_code=500,
+                            detail=f"Error subiendo foto '{photo.filename}' a S3: {str(e)}"
+                        )
+                else:
+                    photo_url = f"https://{bucket_name}.s3.amazonaws.com/{s3_key}"
+                    photos_urls.append(photo_url)
+                    print(f"⚠️ Modo desarrollo: URL ficticia generada para {photo.filename}")
+
+        # Preparar datos para guardar en Firebase
+        reporte_data = {
+            "id": reporte_id,
+            "tipo_intervencion": tipo_intervencion,
+            "unidades_impactadas": unidades_impactadas,
+            "descripcion_intervencion": descripcion_intervencion,
+            "direccion": direccion,
+            "registrado_por": registrado_por,
+            "grupo": grupo,
+            "id_actividad": id_actividad,
+            "observaciones": observaciones or "",
+            "coordinates": geometry,
+            "comuna_corregimiento": comuna_corregimiento,
+            "barrio_vereda": barrio_vereda,
+            "photosUrl": photos_urls,
+            "photos_uploaded": len(photos_urls),
+            "timestamp": timestamp
+        }
+
+        # Guardar en Firebase
+        try:
+            db.collection('reportes_intervenciones_grupo_umata').document(reporte_id).set(reporte_data)
+            print(f"✅ Reporte de intervención grupo UMATA {reporte_id} guardado en Firebase")
+        except Exception as e:
+            print(f"❌ Error guardando en Firebase: {str(e)}")
+            if s3_client:
+                for photo_url in photos_urls:
+                    try:
+                        s3_key = photo_url.split('.com/')[-1]
+                        s3_client.delete_object(Bucket=bucket_name, Key=s3_key)
+                    except:
+                        pass
+            raise HTTPException(
+                status_code=500,
+                detail=f"Error guardando en Firebase: {str(e)}"
+            )
+
+        return ReconocimientoResponse(
+            success=True,
+            id=reporte_id,
+            message="Reporte de intervención del grupo UMATA registrado exitosamente",
+            nombre_parque=None,
+            coordinates=geometry,
+            photosUrl=photos_urls,
+            photos_uploaded=len(photos_urls),
+            timestamp=timestamp
+        )
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Error registrando reporte de intervención del grupo UMATA: {str(e)}"
+        )
+
+
+# ==================== ENDPOINT: Obtener Reportes de Intervención - Grupo UMATA ====================#
+@router.get(
+    "/grupo-umata/reportes_intervenciones",
+    summary="🔵 GET | Obtener Reportes de Intervención del Grupo UMATA",
+    description="""
+## 🔵 GET | Obtener Reportes de Intervención del Grupo UMATA
+
+**Propósito**: Consultar reportes de intervención registrados por el grupo UMATA desde Firebase.
+
+### 📥 Parámetros de Filtrado (opcionales)
+- **id**: Filtrar por ID específico del reporte (coincidencia exacta)
+- **id_actividad**: Filtrar por ID de actividad asociada (coincidencia exacta)
+- **grupo**: Filtrar por nombre del grupo operativo (coincidencia exacta)
+
+### 📝 Ejemplos de uso:
+```javascript
+// Obtener todos los reportes
+fetch('/grupo-umata/reportes_intervenciones');
+
+// Filtrar por ID específico
+fetch('/grupo-umata/reportes_intervenciones?id=abc-123-xyz');
+
+// Filtrar por ID de actividad
+fetch('/grupo-umata/reportes_intervenciones?id_actividad=ACT-2026-1234');
+
+// Filtrar por grupo
+fetch('/grupo-umata/reportes_intervenciones?grupo=UMATA');
+
+// Combinar filtros
+fetch('/grupo-umata/reportes_intervenciones?id_actividad=ACT-2026-1234&grupo=UMATA');
+```
+
+### 📊 Estructura de datos retornados:
+```json
+{
+  "success": true,
+  "total": 5,
+  "data": [
+    {
+      "id": "uuid",
+      "tipo_intervencion": "Asistencia técnica agropecuaria",
+      "unidades_impactadas": 15,
+      "descripcion_intervencion": "...",
+      "direccion": "Vereda El Saladito",
+      "registrado_por": "Juan Pérez",
+      "grupo": "UMATA",
+      "id_actividad": "ACT-2026-1234",
+      "coordinates": {...},
+      "photosUrl": [...],
+      "timestamp": "2026-02-23T10:30:00-05:00"
+    }
+  ],
+  "filters": {
+    "id": null,
+    "id_actividad": "ACT-2026-1234",
+    "grupo": null
+  },
+  "timestamp": "2026-02-23T15:30:00Z"
+}
+```
+    """
+)
+async def get_reportes_intervenciones_grupo_umata(
+    id: Optional[str] = Query(None, min_length=1, description="Filtrar por ID del reporte"),
+    id_actividad: Optional[str] = Query(None, min_length=1, description="Filtrar por ID de actividad"),
+    grupo: Optional[str] = Query(None, min_length=1, description="Filtrar por nombre del grupo")
+):
+    """
+    Obtener reportes de intervención del grupo UMATA con filtros opcionales
+    """
+    try:
+        reportes_ref = db.collection('reportes_intervenciones_grupo_umata')
+
+        if id:
+            doc = reportes_ref.document(id).get()
+            if doc.exists:
+                data = doc.to_dict()
+                data['id'] = doc.id
+                return {
+                    "success": True,
+                    "total": 1,
+                    "data": [data],
+                    "filters": {
+                        "id": id,
+                        "id_actividad": id_actividad,
+                        "grupo": grupo
+                    },
+                    "timestamp": datetime.now(timezone.utc).isoformat()
+                }
+
+            docs = reportes_ref.where("id", "==", id).stream()
+            reportes = []
+            for doc in docs:
+                data = doc.to_dict()
+                data['id'] = doc.id
+                reportes.append(data)
+
+            if not reportes:
+                return {
+                    "success": True,
+                    "total": 0,
+                    "data": [],
+                    "filters": {
+                        "id": id,
+                        "id_actividad": id_actividad,
+                        "grupo": grupo
+                    },
+                    "timestamp": datetime.now(timezone.utc).isoformat()
+                }
+
+            return {
+                "success": True,
+                "total": len(reportes),
+                "data": reportes,
+                "filters": {
+                    "id": id,
+                    "id_actividad": id_actividad,
+                    "grupo": grupo
+                },
+                "timestamp": datetime.now(timezone.utc).isoformat()
+            }
+
+        query = reportes_ref
+
+        if id_actividad:
+            query = query.where('id_actividad', '==', id_actividad.strip())
+
+        if grupo:
+            query = query.where('grupo', '==', grupo.strip())
+
+        docs = query.stream()
+
+        reportes = []
+        for doc in docs:
+            data = doc.to_dict()
+            data['id'] = doc.id
+            reportes.append(data)
+
+        return {
+            "success": True,
+            "total": len(reportes),
+            "data": reportes,
+            "filters": {
+                "id": id,
+                "id_actividad": id_actividad.strip() if id_actividad else None,
+                "grupo": grupo.strip() if grupo else None
+            },
+            "timestamp": datetime.now(timezone.utc).isoformat()
+        }
+
+    except Exception as e:
+        print(f"❌ Error obteniendo reportes de intervención grupo UMATA: {str(e)}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"Error obteniendo reportes de intervención del grupo UMATA: {str(e)}"
+        )
