@@ -1,18 +1,16 @@
-from google.oauth2 import service_account
-from googleapiclient.discovery import build
-from datetime import timedelta
 """
 Rutas para gestión de Artefacto de Captura DAGMA
 """
 from fastapi import APIRouter, HTTPException, Form, UploadFile, File, Query
 from typing import List, Optional
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 import pytz
 import json
 import uuid
 import math
 import os
 import io
+import logging
 from pydantic import BaseModel, Field
 
 # Importar configuración de Firebase y S3/Storage
@@ -20,6 +18,15 @@ from app.firebase_config import db
 from firebase_admin import firestore
 import boto3
 from botocore.exceptions import ClientError
+
+# Servicios de notificación Google (Gmail + Calendar)
+from app.services.gmail_service import (
+    send_activity_confirmation_email,
+    send_assignment_notification_email,
+)
+from app.services.calendar_service import create_activity_event, add_attendee_to_event
+
+logger = logging.getLogger(__name__)
 
 # Importar librerías para intersecciones geográficas
 from shapely.geometry import Point, shape
@@ -1115,115 +1122,28 @@ async def convocar_actividad(
             "email": body.email,
             "estado_actividad": "Programada"
         }
-        # Crear evento simple en Google Calendar (sin invitados)
+        # Crear evento en Google Calendar con el coordinador como asistente
         try:
-            SCOPES = ['https://www.googleapis.com/auth/calendar']
-            
-            # Cargar credenciales desde múltiples fuentes (como en firebase_config.py)
-            credentials = None
-            
-            # DEBUG: Mostrar qué variables existen
-            print(f"\n[CALENDAR DEBUG] Iniciando carga de credenciales...")
-            print(f"[CALENDAR DEBUG] FIREBASE_SERVICE_ACCOUNT_JSON exists: {bool(os.getenv('FIREBASE_SERVICE_ACCOUNT_JSON'))}")
-            print(f"[CALENDAR DEBUG] GOOGLE_APPLICATION_CREDENTIALS: {os.getenv('GOOGLE_APPLICATION_CREDENTIALS')}")
-            
-            # Método 1: Usar JSON desde variable de entorno (Railway, Heroku)
-            SERVICE_ACCOUNT_JSON = os.getenv('FIREBASE_SERVICE_ACCOUNT_JSON')
-            if SERVICE_ACCOUNT_JSON:
-                print(f"[CALENDAR DEBUG] Intentando cargar desde FIREBASE_SERVICE_ACCOUNT_JSON...")
-                try:
-                    # Validar que sea JSON válido
-                    print(f"[CALENDAR DEBUG] Largura de JSON: {len(SERVICE_ACCOUNT_JSON)} caracteres")
-                    service_account_info = json.loads(SERVICE_ACCOUNT_JSON)
-                    print(f"[CALENDAR DEBUG] JSON válido. Campos: {list(service_account_info.keys())}")
-                    credentials = service_account.Credentials.from_service_account_info(
-                        service_account_info, scopes=SCOPES)
-                    print(f"[CALENDAR DEBUG] ✅ Credenciales cargadas exitosamente desde FIREBASE_SERVICE_ACCOUNT_JSON")
-                except json.JSONDecodeError as e:
-                    print(f"[CALENDAR ERROR] JSON inválido en FIREBASE_SERVICE_ACCOUNT_JSON: {e}")
-                except Exception as e:
-                    print(f"[CALENDAR ERROR] Error cargando desde FIREBASE_SERVICE_ACCOUNT_JSON: {e}")
-            else:
-                print(f"[CALENDAR DEBUG] FIREBASE_SERVICE_ACCOUNT_JSON NO está configurada")
-            
-            # Método 2: Usar ruta de archivo (GOOGLE_APPLICATION_CREDENTIALS)
-            if not credentials:
-                print(f"[CALENDAR DEBUG] Intentando cargar desde GOOGLE_APPLICATION_CREDENTIALS...")
-                GOOGLE_CREDS_PATH = os.getenv('GOOGLE_APPLICATION_CREDENTIALS')
-                if GOOGLE_CREDS_PATH and os.path.exists(GOOGLE_CREDS_PATH):
-                    try:
-                        print(f"[CALENDAR DEBUG] Archivo encontrado: {GOOGLE_CREDS_PATH}")
-                        credentials = service_account.Credentials.from_service_account_file(
-                            GOOGLE_CREDS_PATH, scopes=SCOPES)
-                        print(f"[CALENDAR DEBUG] ✅ Credenciales cargadas exitosamente desde {GOOGLE_CREDS_PATH}")
-                    except Exception as e:
-                        print(f"[CALENDAR ERROR] Error cargando desde {GOOGLE_CREDS_PATH}: {e}")
-                else:
-                    print(f"[CALENDAR DEBUG] GOOGLE_APPLICATION_CREDENTIALS no configurada o archivo no existe")
-            
-            # Método 3: Buscar archivos locales (desarrollo)
-            if not credentials:
-                print(f"[CALENDAR DEBUG] Intentando cargar desde archivos locales...")
-                possible_paths = [
-                    os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), 'dagma-85aad-firebase-adminsdk-fbsvc-1e7612eab5.json'),
-                    'dagma-85aad-firebase-adminsdk-fbsvc-1e7612eab5.json',
-                    'env/dagma-85aad-b7afe1c0f77f.json',
-                ]
-                for path in possible_paths:
-                    print(f"[CALENDAR DEBUG] Buscando: {path}")
-                    if os.path.exists(path):
-                        try:
-                            print(f"[CALENDAR DEBUG] Archivo encontrado: {path}")
-                            credentials = service_account.Credentials.from_service_account_file(
-                                path, scopes=SCOPES)
-                            print(f"[CALENDAR DEBUG] ✅ Credenciales cargadas exitosamente desde {path}")
-                            break
-                        except Exception as e:
-                            print(f"[CALENDAR ERROR] Error cargando {path}: {e}")
-                            continue
-                    else:
-                        print(f"[CALENDAR DEBUG] No encontrado: {path}")
-            
-            if not credentials:
-                error_msg = "No se encontraron credenciales para Google Calendar. Configura FIREBASE_SERVICE_ACCOUNT_JSON o GOOGLE_APPLICATION_CREDENTIALS"
-                print(f"[CALENDAR CRITICAL] {error_msg}")
-                raise ValueError(error_msg)
-            service = build('calendar', 'v3', credentials=credentials)
-            calendar_id = '19c263371dc17e144c9ee0b12ac40c28339cb20c259f528d348730d98e193eb9@group.calendar.google.com'
-            # Parsear fecha y hora a formato RFC3339
-            fecha = body.fecha_actividad  # dd/mm/aaaa
-            hora = body.hora_encuentro   # hh:mm
-            try:
-                dt_inicio = datetime.strptime(f"{fecha} {hora}", "%d/%m/%Y %H:%M")
-                dt_inicio = tz_col.localize(dt_inicio)
-                dt_fin = dt_inicio + timedelta(hours=2)  # Duración por defecto: 2h
-            except Exception as e:
-                dt_inicio = datetime.now(tz_col)
-                dt_fin = dt_inicio + timedelta(hours=2)
-            event = {
-                'summary': f"Actividad DAGMA: {body.objetivo_actividad}",
-                'location': direccion,
-                'description': body.observaciones or '',
-                'start': {
-                    'dateTime': dt_inicio.isoformat(),
-                    'timeZone': 'America/Bogota',
-                },
-                'end': {
-                    'dateTime': dt_fin.isoformat(),
-                    'timeZone': 'America/Bogota',
-                },
-                'reminders': {
-                    'useDefault': True,
-                },
-            }
-            created_event = service.events().insert(calendarId=calendar_id, body=event).execute()
-            actividad_data['calendar_event_id'] = created_event.get('id')
-            actividad_data['calendar_event_link'] = created_event.get('htmlLink')
+            created_event = create_activity_event(
+                actividad_data=actividad_data,
+                attendee_emails=[body.email]
+            )
+            if created_event:
+                actividad_data['calendar_event_id'] = created_event.get('id')
+                actividad_data['calendar_event_link'] = created_event.get('htmlLink')
         except Exception as e:
-            print(f"⚠️ Error creando evento en Google Calendar: {e}")
+            logger.warning(f"[CALENDAR] Error creando evento: {e}")
             actividad_data['calendar_event_error'] = str(e)
+
         # Guardar en Firebase
         db.collection("plan_distrito_verde").document(actividad_id).set(actividad_data)
+
+        # Email de confirmación al coordinador (no bloqueante)
+        try:
+            send_activity_confirmation_email(body.email, actividad_data)
+        except Exception as e:
+            logger.warning(f"[GMAIL] Error enviando confirmación: {e}")
+
         return ConvocarActividadResponse(
             success=True,
             id=actividad_id,
@@ -1262,6 +1182,7 @@ async def asignar_personal_actividad(
 
         plan_ref = db.collection("plan_distrito_verde")
         cache_actividades: dict[str, str] = {}
+        cache_actividad_data: dict[str, dict] = {}
 
         def resolver_actividad_document_id(actividad_id: str) -> str:
             if actividad_id in cache_actividades:
@@ -1312,6 +1233,34 @@ async def asignar_personal_actividad(
             db.collection("personal_asignado_actividad").document(asignacion_id).set(personal_data)
             registros_guardados.append(personal_data)
             ids_creados.append(asignacion_id)
+
+            # Obtener datos de la actividad con cache (para email + calendar)
+            if actividad_document_id not in cache_actividad_data:
+                try:
+                    doc = db.collection("plan_distrito_verde").document(actividad_document_id).get()
+                    cache_actividad_data[actividad_document_id] = doc.to_dict() or {} if doc.exists else {}
+                except Exception:
+                    cache_actividad_data[actividad_document_id] = {}
+            actividad_doc_data = cache_actividad_data[actividad_document_id]
+
+            # Email de asignación (no bloqueante)
+            try:
+                send_assignment_notification_email(
+                    person_email=item.email.strip(),
+                    nombre=item.nombre_completo.strip(),
+                    grupo=item.grupo.strip(),
+                    actividad_data=actividad_doc_data
+                )
+            except Exception as e:
+                logger.warning(f"[GMAIL] Error notificando a {item.email}: {e}")
+
+            # Agregar como asistente al evento de Calendar (no bloqueante)
+            calendar_event_id = actividad_doc_data.get('calendar_event_id')
+            if calendar_event_id:
+                try:
+                    add_attendee_to_event(calendar_event_id, item.email.strip())
+                except Exception as e:
+                    logger.warning(f"[CALENDAR] Error agregando {item.email}: {e}")
 
         marca_respuesta = datetime.now(tz_col).isoformat()
 

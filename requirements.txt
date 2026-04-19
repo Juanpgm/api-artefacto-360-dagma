@@ -32,3 +32,10 @@ httpx==0.25.2
 
 # Zona horaria
 pytz
+
+# Google Calendar API
+google-api-python-client==2.188.0
+google-auth==2.47.0
+
+# iCalendar — para adjuntar invitaciones .ics en correos de notificación
+icalendar==6.1.3
