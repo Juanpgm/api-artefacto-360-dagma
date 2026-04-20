@@ -1,7 +1,7 @@
 {
   "indexes": [
     {
-      "collectionGroup": "plan_distrito_verde",
+      "collectionGroup": "actividades",
       "queryScope": "COLLECTION",
       "fields": [
         { "fieldPath": "grupo", "order": "ASCENDING" },
@@ -9,7 +9,7 @@
       ]
     },
     {
-      "collectionGroup": "plan_distrito_verde",
+      "collectionGroup": "actividades",
       "queryScope": "COLLECTION",
       "fields": [
         { "fieldPath": "estado_actividad", "order": "ASCENDING" },
@@ -17,7 +17,7 @@
       ]
     },
     {
-      "collectionGroup": "plan_distrito_verde",
+      "collectionGroup": "actividades",
       "queryScope": "COLLECTION",
       "fields": [
         { "fieldPath": "grupo", "order": "ASCENDING" },

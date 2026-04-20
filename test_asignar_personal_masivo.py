@@ -2,7 +2,7 @@
 Prueba masiva para el endpoint POST /asignar_personal_actividad.
 
 Flujo:
-1) Lee todas las actividades desde GET /actividades_plan_distrito_verde (colección plan_distrito_verde).
+1) Lee todas las actividades desde GET /actividades (colección actividades).
 2) Para cada actividad, genera un número distinto de personas entre 2 y 10.
 3) Envía un POST por actividad con la lista de personal.
 4) Imprime resumen de resultados.
@@ -15,7 +15,7 @@ from datetime import datetime
 import requests
 
 API_URL = "http://localhost:8000"
-GET_ACTIVIDADES_ENDPOINT = f"{API_URL}/actividades_plan_distrito_verde"
+GET_ACTIVIDADES_ENDPOINT = f"{API_URL}/actividades"
 POST_ASIGNAR_ENDPOINT = f"{API_URL}/asignar_personal_actividad"
 
 
@@ -60,14 +60,14 @@ def ejecutar_prueba():
     print("🧪 PRUEBA MASIVA: POST /asignar_personal_actividad")
     print("=" * 72)
 
-    # 1) Leer actividades (colección plan_distrito_verde)
+    # 1) Leer actividades (colección actividades)
     respuesta_actividades = requests.get(GET_ACTIVIDADES_ENDPOINT, timeout=30)
-    print(f"GET /actividades_plan_distrito_verde -> {respuesta_actividades.status_code}")
+    print(f"GET /actividades -> {respuesta_actividades.status_code}")
     respuesta_actividades.raise_for_status()
 
     actividades = respuesta_actividades.json().get("data", [])
     if not actividades:
-        raise SystemExit("No hay actividades en plan_distrito_verde para ejecutar la prueba.")
+        raise SystemExit("No hay actividades para ejecutar la prueba.")
 
     ids_actividades = [actividad.get("id") for actividad in actividades if actividad.get("id")]
     if not ids_actividades:

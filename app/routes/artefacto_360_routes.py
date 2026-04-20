@@ -1,4 +1,4 @@
-﻿"""
+"""
 Rutas para gestión de Artefacto de Captura DAGMA
 """
 from fastapi import APIRouter, HTTPException, Form, UploadFile, File, Query, Response
@@ -1164,12 +1164,12 @@ async def get_grupos(
         )
 
 
-# ==================== ENDPOINT 5: Obtener Actividades Plan Distrito Verde ======================================#
+# ==================== ENDPOINT 5: Obtener Actividades ======================================#
 @router.get(
-    "/actividades_plan_distrito_verde",
-    summary="🟢 GET | Obtener Actividades del Plan Distrito Verde",
+    "/actividades",
+    summary="🔵 GET | Obtener Actividades",
     description="""
-## 🟢 GET | Obtener Actividades del Plan Distrito Verde
+## 🔵 GET | Obtener Actividades
 
 **Propósito**: Consultar actividades registradas en el plan de intervención "Distrito Verde" desde Firebase.
 
@@ -1182,10 +1182,10 @@ async def get_grupos(
 ### 📝 Ejemplos de uso:
 ```javascript
 // Primera página
-fetch('/actividades_plan_distrito_verde?grupo=cuadrilla&limit=50');
+fetch('/actividades?grupo=cuadrilla&limit=50');
 
 // Página siguiente (cursor del último id recibido)
-fetch('/actividades_plan_distrito_verde?grupo=cuadrilla&limit=50&start_after=LAST_DOC_ID');
+fetch('/actividades?grupo=cuadrilla&limit=50&start_after=LAST_DOC_ID');
 ```
 
 ### 📊 Respuesta paginada:
@@ -1200,7 +1200,7 @@ fetch('/actividades_plan_distrito_verde?grupo=cuadrilla&limit=50&start_after=LAS
 ```
     """
 )
-async def get_actividades_plan_distrito_verde(
+async def get_actividades(
     response: Response,
     id: Optional[str] = Query(None, description="Filtrar por ID de actividad"),
     grupo: Optional[str] = Query(None, description="Filtrar por grupo operativo"),
@@ -1208,7 +1208,7 @@ async def get_actividades_plan_distrito_verde(
     start_after: Optional[str] = Query(None, description="ID del último doc recibido (cursor de paginación)"),
 ):
     """
-    Obtener actividades del plan Distrito Verde con filtro por grupo y paginación cursor.
+    Obtener actividades con filtro por grupo y paginación cursor.
     """
     try:
         def obtener_personal_asignado(actividad_document_id: str, actividad_id_interno: Optional[str] = None) -> list[dict]:
@@ -1235,7 +1235,7 @@ async def get_actividades_plan_distrito_verde(
 
             return personal_encontrado
 
-        plan_ref = db.collection('plan_distrito_verde')
+        plan_ref = db.collection('actividades')
 
         # Búsqueda por ID único — sin paginación
         if id:
@@ -1327,7 +1327,7 @@ async def get_actividades_plan_distrito_verde(
         print(f"❌ Error obteniendo actividades: {str(e)}")
         raise HTTPException(
             status_code=500,
-            detail=f"Error obteniendo actividades del plan Distrito Verde: {str(e)}"
+            detail=f"Error obteniendo actividades: {str(e)}"
         )
 
 
@@ -1447,7 +1447,7 @@ async def convocar_actividad(
             actividad_data['calendar_event_error'] = str(e)
 
         # Guardar en Firebase
-        db.collection("plan_distrito_verde").document(actividad_id).set(actividad_data)
+        db.collection("actividades").document(actividad_id).set(actividad_data)
 
         # Email de confirmación al coordinador (no bloqueante)
         try:
@@ -1491,7 +1491,7 @@ async def asignar_personal_actividad(
         if not body:
             raise HTTPException(status_code=400, detail="Debe enviar al menos un registro de personal")
 
-        plan_ref = db.collection("plan_distrito_verde")
+        plan_ref = db.collection("actividades")
         cache_actividades: dict[str, str] = {}
         cache_actividad_data: dict[str, dict] = {}
 
@@ -1548,7 +1548,7 @@ async def asignar_personal_actividad(
             # Obtener datos de la actividad con cache (para email + calendar)
             if actividad_document_id not in cache_actividad_data:
                 try:
-                    doc = db.collection("plan_distrito_verde").document(actividad_document_id).get()
+                    doc = db.collection("actividades").document(actividad_document_id).get()
                     cache_actividad_data[actividad_document_id] = doc.to_dict() or {} if doc.exists else {}
                 except Exception:
                     cache_actividad_data[actividad_document_id] = {}
@@ -1590,12 +1590,12 @@ async def asignar_personal_actividad(
 
 
 @router.delete(
-    "/plan_distrito_verde/{actividad_id}",
-    summary="🔴 DELETE | Eliminar Actividad Programada",
+    "/actividades/{actividad_id}",
+    summary="🔴 DELETE | Eliminar Actividad",
     description="""
-## 🔴 DELETE | Eliminar Actividad Programada
+## 🔴 DELETE | Eliminar Actividad
 
-**Propósito**: Eliminar un registro de la colección `plan_distrito_verde` a partir de su `id`.
+**Propósito**: Eliminar un registro de la colección `actividades` a partir de su `id`.
 
 ### 📥 Parámetros
 - **actividad_id**: ID del registro a eliminar
@@ -1611,12 +1611,12 @@ async def asignar_personal_actividad(
 ```
     """
 )
-async def delete_plan_distrito_verde(actividad_id: str):
+async def delete_actividad(actividad_id: str):
     """
-    Eliminar actividad del plan Distrito Verde por ID
+    Eliminar actividad por ID
     """
     try:
-        collection_ref = db.collection("plan_distrito_verde")
+        collection_ref = db.collection("actividades")
 
         # Intentar primero por ID de documento
         doc_ref = collection_ref.document(actividad_id)
@@ -1659,12 +1659,12 @@ async def delete_plan_distrito_verde(actividad_id: str):
 
 
 @router.put(
-    "/plan_distrito_verde/{actividad_id}",
-    summary="🟡 PUT | Actualizar Actividad Programada",
+    "/actividades/{actividad_id}",
+    summary="🟡 PUT | Actualizar Actividad",
     description="""
-## 🟡 PUT | Actualizar Actividad Programada
+## 🟡 PUT | Actualizar Actividad
 
-**Propósito**: Modificar cualquier campo de un registro en la colección `plan_distrito_verde`.
+**Propósito**: Modificar cualquier campo de un registro en la colección `actividades`.
 
 ### 📥 Parámetros
 - **actividad_id**: ID del registro a actualizar
@@ -1687,7 +1687,7 @@ async def delete_plan_distrito_verde(actividad_id: str):
 
 ### 📝 Ejemplo de uso:
 ```javascript
-const response = await fetch('/plan_distrito_verde/abc-123', {
+const response = await fetch('/actividades/abc-123', {
     method: 'PUT',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({
@@ -1698,9 +1698,9 @@ const response = await fetch('/plan_distrito_verde/abc-123', {
 ```
     """
 )
-async def update_plan_distrito_verde(actividad_id: str, body: dict):
+async def update_actividad(actividad_id: str, body: dict):
     """
-    Actualizar un registro del plan Distrito Verde con los campos especificados
+    Actualizar una actividad con los campos especificados
     """
     try:
         if not body:
@@ -1709,7 +1709,7 @@ async def update_plan_distrito_verde(actividad_id: str, body: dict):
                 detail="El cuerpo de la solicitud no puede estar vacío"
             )
 
-        collection_ref = db.collection("plan_distrito_verde")
+        collection_ref = db.collection("actividades")
 
         # Intentar primero por ID de documento
         doc_ref = collection_ref.document(actividad_id)
@@ -1757,8 +1757,104 @@ async def update_plan_distrito_verde(actividad_id: str, body: dict):
     except Exception as e:
         raise HTTPException(
             status_code=500,
-            detail=f"Error actualizando actividad del plan Distrito Verde: {str(e)}"
+            detail=f"Error actualizando actividad: {str(e)}"
         )
+
+
+# ==================== ENDPOINT: PATCH Personal Asignado en Actividad ========================#
+
+class PersonalAsignadoItem(BaseModel):
+    nombre_completo: str = Field(..., min_length=1, description="Nombre completo")
+    email: str = Field(..., min_length=1, description="Correo electrónico")
+    numero_contacto: int = Field(..., description="Número de contacto")
+    grupo: str = Field(..., min_length=1, description="Grupo operativo")
+
+
+@router.patch(
+    "/actividades/{actividad_id}/personal_asignado",
+    summary="🟠 PATCH | Agregar Personal Asignado a Actividad",
+    description="""
+## 🟠 PATCH | Agregar Personal Asignado a Actividad
+
+**Propósito**: Agrega un integrante al array `personal_asignado` dentro del documento de la actividad.
+Si el campo no existe, lo crea automáticamente.
+
+### 📥 Path
+- **actividad_id**: ID de la actividad
+
+### 📥 Body (JSON)
+```json
+{
+  "nombre_completo": "Juan Pérez",
+  "email": "juan@cali.gov.co",
+  "numero_contacto": 3001234567,
+  "grupo": "Cuadrilla"
+}
+```
+
+### ✅ Respuesta
+```json
+{
+  "success": true,
+  "message": "Personal agregado a la actividad",
+  "actividad_id": "...",
+  "personal_agregado": { ... },
+  "total_personal": 3,
+  "timestamp": "..."
+}
+```
+    """,
+    tags=["Artefacto de Captura DAGMA"],
+)
+async def patch_personal_asignado(actividad_id: str, body: PersonalAsignadoItem):
+    """
+    Agrega un integrante al campo personal_asignado de una actividad.
+    Crea el array si no existe.
+    """
+    try:
+        collection_ref = db.collection("actividades")
+
+        # Resolver el documento
+        doc_ref = collection_ref.document(actividad_id)
+        doc_snap = doc_ref.get()
+
+        if not doc_snap.exists:
+            # Fallback: buscar por campo interno 'id'
+            docs = collection_ref.where("id", "==", actividad_id).limit(1).stream()
+            matching = next(docs, None)
+            if not matching:
+                raise HTTPException(status_code=404, detail=f"No se encontró actividad con id: {actividad_id}")
+            doc_ref = collection_ref.document(matching.id)
+            doc_snap = doc_ref.get()
+
+        nuevo_personal = {
+            "nombre_completo": body.nombre_completo.strip(),
+            "email": body.email.strip(),
+            "numero_contacto": body.numero_contacto,
+            "grupo": body.grupo.strip(),
+        }
+
+        # ArrayUnion crea el campo si no existe, y agrega sin duplicar objetos idénticos
+        doc_ref.update({
+            "personal_asignado": firestore.ArrayUnion([nuevo_personal])
+        })
+
+        # Leer el doc actualizado para devolver el total
+        updated = doc_ref.get().to_dict() or {}
+        total = len(updated.get("personal_asignado", []))
+
+        return {
+            "success": True,
+            "message": "Personal agregado a la actividad",
+            "actividad_id": actividad_id,
+            "personal_agregado": nuevo_personal,
+            "total_personal": total,
+            "timestamp": datetime.now(pytz.timezone("America/Bogota")).isoformat(),
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error agregando personal a actividad: {str(e)}")
 
 
 # ==================== ENDPOINT: Personal Operativo ======================================#

@@ -1,6 +1,6 @@
 """
 Prueba masiva del endpoint POST /asignar_personal_actividad
-- Lee todas las actividades de plan_distrito_verde
+- Lee todas las actividades de la colección actividades
 - Para cada actividad, asigna entre 2 y 10 personas
 - La cantidad de personas varía por actividad
 """
@@ -40,13 +40,13 @@ def test_asignar_personal_todas_actividades() -> None:
     print("🧪 PRUEBA MASIVA: /asignar_personal_actividad para todas las actividades")
     print("=" * 80)
 
-    get_response = requests.get(f"{API_URL}/actividades_plan_distrito_verde", timeout=60)
-    print(f"\nGET /actividades_plan_distrito_verde -> {get_response.status_code}")
+    get_response = requests.get(f"{API_URL}/actividades", timeout=60)
+    print(f"\nGET /actividades -> {get_response.status_code}")
     get_response.raise_for_status()
 
     actividades = get_response.json().get("data", [])
     if not actividades:
-        raise AssertionError("No hay actividades en plan_distrito_verde para ejecutar la prueba")
+        raise AssertionError("No hay actividades para ejecutar la prueba")
 
     resumen = []
     marca = datetime.now().strftime("%Y%m%d%H%M%S")
