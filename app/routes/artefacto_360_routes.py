@@ -2062,11 +2062,21 @@ async def get_reportes_intervenciones_todos(
 
     results = await asyncio.gather(*tasks)
 
+    # Enriquecer reportes con presigned URLs de S3
+    bucket_name = os.getenv('S3_BUCKET_NAME', '360-dagma-photos')
+    s3_client = None
+    try:
+        s3_client = get_s3_client()
+    except Exception:
+        print("⚠️ No se pudo inicializar S3 client para presigned URLs en reportes unificados")
+
     data: dict[str, list] = {}
     totals: dict[str, int] = {}
     total_general = 0
 
     for grupo_key, reportes in results:
+        if s3_client and reportes:
+            enriquecer_reportes_con_enlaces(reportes, s3_client, bucket_name)
         data[grupo_key] = reportes
         totals[grupo_key] = len(reportes)
         total_general += len(reportes)
