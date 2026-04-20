@@ -1857,14 +1857,15 @@ async def patch_personal_asignado(actividad_id: str, body: PersonalAsignadoItem)
         raise HTTPException(status_code=500, detail=f"Error agregando personal a actividad: {str(e)}")
 
 
-@router.delete(
+@router.put(
     "/actividades/{actividad_id}/personal_asignado",
-    summary="🔴 DELETE | Eliminar Personal Asignado de Actividad",
+    summary="🟡 PUT | Reemplazar Personal Asignado de Actividad",
     description="""
-## 🔴 DELETE | Eliminar Personal Asignado de Actividad
+## 🟡 PUT | Reemplazar Personal Asignado de Actividad
 
-**Propósito**: Elimina uno o varios integrantes del array `personal_asignado` usando el **email** como identificador.
-Los registros cuyo email no aparezca en la lista enviada quedan intactos.
+**Propósito**: Reemplaza completamente el array `personal_asignado` del documento de la actividad.
+El frontend obtiene la lista actual con GET, edita (agrega, elimina o modifica integrantes)
+y envía el array completo para sobreescribirlo en Firestore.
 
 ### 📥 Path
 - **actividad_id**: ID de la actividad
@@ -1872,47 +1873,75 @@ Los registros cuyo email no aparezca en la lista enviada quedan intactos.
 ### 📥 Body (JSON)
 ```json
 {
-  "emails": ["juan@cali.gov.co"]
+  "personal_asignado": [
+    {
+      "nombre_completo": "Juan Pérez",
+      "email": "juan@cali.gov.co",
+      "numero_contacto": 3001234567,
+      "grupo": "Cuadrilla"
+    },
+    {
+      "nombre_completo": "María López",
+      "email": "maria@cali.gov.co",
+      "numero_contacto": 3009876543,
+      "grupo": "Vivero"
+    }
+  ]
 }
 ```
-o varios:
+
+Para **vaciar** el personal, enviar array vacío:
 ```json
-{
-  "emails": ["juan@cali.gov.co", "maria@cali.gov.co"]
-}
+{ "personal_asignado": [] }
 ```
 
 ### ✅ Respuesta
 ```json
 {
   "success": true,
-  "message": "Se eliminaron 2 de 2 emails solicitados",
+  "message": "Personal asignado actualizado (2 integrantes)",
   "actividad_id": "...",
-  "emails_eliminados": ["juan@cali.gov.co", "maria@cali.gov.co"],
-  "emails_no_encontrados": [],
-  "total_personal": 3,
+  "total_personal": 2,
+  "personal_asignado": [...],
   "timestamp": "..."
 }
 ```
     """,
     tags=["Artefacto de Captura DAGMA"],
 )
-async def delete_personal_asignado(actividad_id: str, body: dict):
+async def put_personal_asignado(actividad_id: str, body: dict):
     """
-    Elimina integrantes del campo personal_asignado usando email como identificador.
-    Recibe { emails: [str] }. Los registros con email no listado quedan intactos.
+    Reemplaza el array personal_asignado completo.
+    Valida que cada entrada tenga email y nombre_completo como mínimo.
     """
     try:
-        emails_raw = body.get("emails")
-        if not emails_raw or not isinstance(emails_raw, list) or len(emails_raw) == 0:
+        personal_nuevo = body.get("personal_asignado")
+        if personal_nuevo is None or not isinstance(personal_nuevo, list):
             raise HTTPException(
                 status_code=400,
-                detail="Debe enviar { \"emails\": [\"email1@...\", ...] } con al menos un email"
+                detail='Debe enviar { "personal_asignado": [ ... ] } como array'
             )
 
-        emails_a_eliminar = {e.strip().lower() for e in emails_raw if isinstance(e, str) and e.strip()}
-        if not emails_a_eliminar:
-            raise HTTPException(status_code=400, detail="No se encontraron emails válidos en la lista")
+        validados = []
+        emails_vistos = set()
+        for i, p in enumerate(personal_nuevo):
+            if not isinstance(p, dict):
+                raise HTTPException(status_code=400, detail=f"Entrada {i} no es un objeto válido")
+            email = (p.get("email") or "").strip().lower()
+            nombre = (p.get("nombre_completo") or "").strip()
+            if not email:
+                raise HTTPException(status_code=400, detail=f"Entrada {i} no tiene email")
+            if not nombre:
+                raise HTTPException(status_code=400, detail=f"Entrada {i} no tiene nombre_completo")
+            if email in emails_vistos:
+                raise HTTPException(status_code=400, detail=f"Email duplicado en la lista: {email}")
+            emails_vistos.add(email)
+            validados.append({
+                "nombre_completo": nombre,
+                "email": email,
+                "numero_contacto": p.get("numero_contacto", 0),
+                "grupo": (p.get("grupo") or "").strip(),
+            })
 
         collection_ref = db.collection("plan_distrito_verde")
 
@@ -1925,39 +1954,21 @@ async def delete_personal_asignado(actividad_id: str, body: dict):
             if not matching:
                 raise HTTPException(status_code=404, detail=f"No se encontró actividad con id: {actividad_id}")
             doc_ref = collection_ref.document(matching.id)
-            doc_snap = doc_ref.get()
 
-        data = doc_snap.to_dict() or {}
-        personal_actual = data.get("personal_asignado", [])
-
-        personal_filtrado = []
-        emails_eliminados = []
-
-        for p in personal_actual:
-            email_p = (p.get("email") or "").strip().lower()
-            if email_p in emails_a_eliminar:
-                emails_eliminados.append(email_p)
-            else:
-                personal_filtrado.append(p)
-
-        emails_no_encontrados = list(emails_a_eliminar - set(emails_eliminados))
-
-        # Sobreescribir el array completo con los registros que se conservan
-        doc_ref.update({"personal_asignado": personal_filtrado})
+        doc_ref.update({"personal_asignado": validados})
 
         return {
             "success": True,
-            "message": f"Se eliminaron {len(emails_eliminados)} de {len(emails_a_eliminar)} emails solicitados",
+            "message": f"Personal asignado actualizado ({len(validados)} integrantes)",
             "actividad_id": actividad_id,
-            "emails_eliminados": emails_eliminados,
-            "emails_no_encontrados": emails_no_encontrados,
-            "total_personal": len(personal_filtrado),
+            "total_personal": len(validados),
+            "personal_asignado": validados,
             "timestamp": datetime.now(pytz.timezone("America/Bogota")).isoformat(),
         }
     except HTTPException:
         raise
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Error eliminando personal de actividad: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Error actualizando personal asignado: {str(e)}")
 
 
 # ==================== ENDPOINT: Personal Operativo ======================================#
