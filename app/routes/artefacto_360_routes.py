@@ -1244,7 +1244,9 @@ async def get_actividades_plan_distrito_verde(
                 data = doc.to_dict()
                 actividad_id_interno = data.get("id") if isinstance(data, dict) else None
                 data['id'] = doc.id
-                data['personal_asignado'] = obtener_personal_asignado(doc.id, actividad_id_interno)
+                personal = obtener_personal_asignado(doc.id, actividad_id_interno)
+                data['grupo'] = personal
+                data['personal_asignado'] = personal
                 response.headers["Cache-Control"] = "public, max-age=60"
                 return {
                     "success": True,
@@ -1262,7 +1264,9 @@ async def get_actividades_plan_distrito_verde(
                 data = doc.to_dict()
                 actividad_id_interno = data.get("id") if isinstance(data, dict) else None
                 data['id'] = doc.id
-                data['personal_asignado'] = obtener_personal_asignado(doc.id, actividad_id_interno)
+                personal = obtener_personal_asignado(doc.id, actividad_id_interno)
+                data['grupo'] = personal
+                data['personal_asignado'] = personal
                 actividades.append(data)
 
             response.headers["Cache-Control"] = "public, max-age=60"
@@ -1296,7 +1300,9 @@ async def get_actividades_plan_distrito_verde(
             data = doc.to_dict()
             actividad_id_interno = data.get("id") if isinstance(data, dict) else None
             data['id'] = doc.id
-            data['personal_asignado'] = obtener_personal_asignado(doc.id, actividad_id_interno)
+            personal = obtener_personal_asignado(doc.id, actividad_id_interno)
+            data['grupo'] = personal
+            data['personal_asignado'] = personal
             actividades.append(data)
             last_doc_id = doc.id
 
