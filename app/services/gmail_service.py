@@ -1,42 +1,60 @@
 """
 Servicio de notificaciones por email para actividades DAGMA.
-Usa SMTP estándar — compatible con Gmail (App Password), Outlook, o cualquier proveedor.
-No requiere domain-wide delegation ni acceso de administrador GCP.
+Usa Gmail API (HTTPS) — funciona en Railway sin requerir puertos SMTP.
+Requiere variables: GMAIL_CLIENT_ID, GMAIL_CLIENT_SECRET, GMAIL_REFRESH_TOKEN, GMAIL_SENDER.
 """
 import os
-import smtplib
+import base64
 import logging
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 from email.mime.base import MIMEBase
 from email import encoders
 
+from google.oauth2.credentials import Credentials
+from google.auth.transport.requests import Request
+from googleapiclient.discovery import build
+from googleapiclient.errors import HttpError
+
 from app.services.ical_service import generate_ics
 
 logger = logging.getLogger(__name__)
 
 
-def _get_smtp_config():
-    """Lee la configuración SMTP de las variables de entorno (lazy, para que load_dotenv() ya haya corrido)."""
-    return {
-        'host': os.getenv('SMTP_HOST', 'smtp.gmail.com'),
-        'port': int(os.getenv('SMTP_PORT', '587')),
-        'user': os.getenv('SMTP_USER', ''),
-        'password': os.getenv('SMTP_PASSWORD', ''),
-        'sender_name': os.getenv('SMTP_SENDER_NAME', 'DAGMA Artefacto 360'),
-    }
+def _get_gmail_service():
+    """Construye el servicio Gmail API usando las credenciales OAuth del entorno."""
+    client_id = os.getenv('GMAIL_CLIENT_ID', '')
+    client_secret = os.getenv('GMAIL_CLIENT_SECRET', '')
+    refresh_token = os.getenv('GMAIL_REFRESH_TOKEN', '')
+
+    if not (client_id and client_secret and refresh_token):
+        logger.warning("[GMAIL] GMAIL_CLIENT_ID, GMAIL_CLIENT_SECRET o GMAIL_REFRESH_TOKEN no configurados")
+        return None
+
+    creds = Credentials(
+        token=None,
+        refresh_token=refresh_token,
+        token_uri='https://oauth2.googleapis.com/token',
+        client_id=client_id,
+        client_secret=client_secret,
+        scopes=['https://www.googleapis.com/auth/gmail.send'],
+    )
+    creds.refresh(Request())
+    return build('gmail', 'v1', credentials=creds, cache_discovery=False)
 
 
 def _send_email(to: str, subject: str, html_body: str, ics_bytes: bytes = None) -> bool:
-    """Envía un correo vía SMTP con adjunto iCal opcional. Retorna True si tuvo éxito."""
-    cfg = _get_smtp_config()
-    if not cfg['user'] or not cfg['password']:
-        logger.warning("[SMTP] SMTP_USER o SMTP_PASSWORD no configurados -- email omitido")
-        return False
+    """Envía un correo vía Gmail API con adjunto iCal opcional. Retorna True si tuvo éxito."""
+    sender = os.getenv('GMAIL_SENDER', '')
+    sender_name = os.getenv('SMTP_SENDER_NAME', 'DAGMA Artefacto 360')
 
     try:
+        service = _get_gmail_service()
+        if service is None:
+            return False
+
         msg = MIMEMultipart('mixed')
-        msg['From'] = f"{cfg['sender_name']} <{cfg['user']}>"
+        msg['From'] = f"{sender_name} <{sender}>"
         msg['To'] = to
         msg['Subject'] = subject
 
@@ -50,27 +68,17 @@ def _send_email(to: str, subject: str, html_body: str, ics_bytes: bytes = None) 
             part.add_header('Content-Type', 'text/calendar; method=REQUEST; charset=utf-8')
             msg.attach(part)
 
-        port = cfg['port']
-        timeout = 15  # segundos
+        raw = base64.urlsafe_b64encode(msg.as_bytes()).decode('utf-8')
+        service.users().messages().send(userId='me', body={'raw': raw}).execute()
 
-        if port == 465:
-            # SSL directo (puerto 465)
-            with smtplib.SMTP_SSL(cfg['host'], port, timeout=timeout) as server:
-                server.login(cfg['user'], cfg['password'])
-                server.sendmail(cfg['user'], to, msg.as_bytes())
-        else:
-            # STARTTLS (puerto 587)
-            with smtplib.SMTP(cfg['host'], port, timeout=timeout) as server:
-                server.ehlo()
-                server.starttls()
-                server.login(cfg['user'], cfg['password'])
-                server.sendmail(cfg['user'], to, msg.as_bytes())
-
-        logger.info(f"[SMTP] Email enviado a {to}")
+        logger.info(f"[GMAIL] Email enviado a {to}")
         return True
 
+    except HttpError as e:
+        logger.error(f"[GMAIL] HttpError enviando a {to}: {e}")
+        return False
     except Exception as e:
-        logger.error(f"[SMTP] Error enviando a {to}: {e}")
+        logger.error(f"[GMAIL] Error enviando a {to}: {e}")
         return False
 
 
