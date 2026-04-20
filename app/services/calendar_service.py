@@ -120,3 +120,42 @@ def add_attendee_to_event(calendar_event_id: str, attendee_email: str) -> bool:
     except Exception as e:
         logger.error(f"[CALENDAR] Error agregando {attendee_email} al evento {calendar_event_id}: {e}")
         return False
+
+
+def remove_attendee_from_event(calendar_event_id: str, attendee_email: str) -> bool:
+    """
+    Elimina un asistente de un evento existente de Calendar.
+    Usa GET + PATCH para filtrar al asistente y actualizar la lista.
+    Retorna True si tuvo éxito, False en caso de error (no propaga excepciones).
+    """
+    try:
+        service = _build_calendar_service()
+
+        existing_event = service.events().get(
+            calendarId=CALENDAR_ID,
+            eventId=calendar_event_id
+        ).execute()
+
+        current_attendees = existing_event.get('attendees', [])
+        updated_attendees = [
+            a for a in current_attendees
+            if a.get('email', '').lower() != attendee_email.lower()
+        ]
+
+        if len(updated_attendees) == len(current_attendees):
+            logger.info(f"[CALENDAR] {attendee_email} no era asistente del evento {calendar_event_id}")
+            return True
+
+        service.events().patch(
+            calendarId=CALENDAR_ID,
+            eventId=calendar_event_id,
+            body={'attendees': updated_attendees},
+            sendUpdates='all'
+        ).execute()
+
+        logger.info(f"[CALENDAR] Asistente {attendee_email} eliminado del evento {calendar_event_id}")
+        return True
+
+    except Exception as e:
+        logger.error(f"[CALENDAR] Error eliminando {attendee_email} del evento {calendar_event_id}: {e}")
+        return False

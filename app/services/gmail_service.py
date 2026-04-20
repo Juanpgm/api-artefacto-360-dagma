@@ -225,3 +225,51 @@ def send_assignment_notification_email(
     except Exception as e:
         logger.error(f"[SMTP] Error enviando notificación a {person_email}: {e}")
         return False
+
+
+def send_removal_notification_email(
+    person_email: str,
+    nombre: str,
+    actividad_data: dict
+) -> bool:
+    """
+    Envía notificación de desasignación a una persona del personal.
+    Informa que ya no necesita presentarse a la actividad.
+    Retorna True si se envió correctamente, False en caso de error (no propaga excepciones).
+    """
+    try:
+        fecha = actividad_data.get('fecha_actividad', '')
+        lider = actividad_data.get('lider_actividad', 'N/A')
+        telefono = actividad_data.get('telefono', 'N/A')
+
+        html = f"""
+        <html><body style="font-family:Arial,sans-serif;color:#333;max-width:620px;margin:auto;padding:0;">
+          <div style="background:#c62828;padding:24px;text-align:center;">
+            <h2 style="color:white;margin:0;">DAGMA — Desasignación de Actividad Ambiental</h2>
+          </div>
+          <div style="padding:28px;">
+            <p>Estimado/a <strong>{nombre}</strong>,</p>
+            <p>Le informamos que ha sido <strong>desasignado/a</strong> de la siguiente actividad ambiental.
+               <strong>No es necesario que se presente</strong> al punto de encuentro.</p>
+            <h3 style="color:#c62828;margin-bottom:8px;">Detalles de la Actividad</h3>
+            {_activity_details_table(actividad_data)}
+            <p style="margin-top:24px;">
+              Si tiene alguna duda, comuníquese con el líder:<br>
+              <strong>{lider}</strong> — Tel: <strong>{telefono}</strong>
+            </p>
+            <hr style="border:none;border-top:1px solid #eee;margin:28px 0;">
+            <p style="font-size:12px;color:#888;margin:0;">
+              Mensaje generado automáticamente por el sistema Artefacto 360 DAGMA.<br>
+              DAGMA — Departamento Administrativo de Gestión del Medio Ambiente, Santiago de Cali.
+            </p>
+          </div>
+        </body></html>
+        """
+        return _send_email(
+            to=person_email,
+            subject=f"Desasignación de Actividad Ambiental DAGMA — {fecha}",
+            html_body=html,
+        )
+    except Exception as e:
+        logger.error(f"[SMTP] Error enviando desasignación a {person_email}: {e}")
+        return False
