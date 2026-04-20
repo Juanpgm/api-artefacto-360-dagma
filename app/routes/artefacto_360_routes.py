@@ -1863,20 +1863,22 @@ async def patch_personal_asignado(actividad_id: str, body: PersonalAsignadoItem)
     description="""
 ## 🔴 DELETE | Eliminar Personal Asignado de Actividad
 
-**Propósito**: Elimina un integrante del array `personal_asignado` dentro del documento de la actividad
-en la colección `plan_distrito_verde`.
+**Propósito**: Elimina uno o varios integrantes del array `personal_asignado` usando el **email** como identificador.
+Los registros cuyo email no aparezca en la lista enviada quedan intactos.
 
 ### 📥 Path
 - **actividad_id**: ID de la actividad
 
 ### 📥 Body (JSON)
-Debe coincidir **exactamente** con el objeto almacenado:
 ```json
 {
-  "nombre_completo": "Juan Pérez",
-  "email": "juan@cali.gov.co",
-  "numero_contacto": 3001234567,
-  "grupo": "Cuadrilla"
+  "emails": ["juan@cali.gov.co"]
+}
+```
+o varios:
+```json
+{
+  "emails": ["juan@cali.gov.co", "maria@cali.gov.co"]
 }
 ```
 
@@ -1884,22 +1886,34 @@ Debe coincidir **exactamente** con el objeto almacenado:
 ```json
 {
   "success": true,
-  "message": "Personal eliminado de la actividad",
+  "message": "Se eliminaron 2 de 2 emails solicitados",
   "actividad_id": "...",
-  "personal_eliminado": { ... },
-  "total_personal": 2,
+  "emails_eliminados": ["juan@cali.gov.co", "maria@cali.gov.co"],
+  "emails_no_encontrados": [],
+  "total_personal": 3,
   "timestamp": "..."
 }
 ```
     """,
     tags=["Artefacto de Captura DAGMA"],
 )
-async def delete_personal_asignado(actividad_id: str, body: PersonalAsignadoItem):
+async def delete_personal_asignado(actividad_id: str, body: dict):
     """
-    Elimina un integrante del campo personal_asignado de una actividad.
-    El objeto debe coincidir exactamente con el almacenado en Firestore.
+    Elimina integrantes del campo personal_asignado usando email como identificador.
+    Recibe { emails: [str] }. Los registros con email no listado quedan intactos.
     """
     try:
+        emails_raw = body.get("emails")
+        if not emails_raw or not isinstance(emails_raw, list) or len(emails_raw) == 0:
+            raise HTTPException(
+                status_code=400,
+                detail="Debe enviar { \"emails\": [\"email1@...\", ...] } con al menos un email"
+            )
+
+        emails_a_eliminar = {e.strip().lower() for e in emails_raw if isinstance(e, str) and e.strip()}
+        if not emails_a_eliminar:
+            raise HTTPException(status_code=400, detail="No se encontraron emails válidos en la lista")
+
         collection_ref = db.collection("plan_distrito_verde")
 
         doc_ref = collection_ref.document(actividad_id)
@@ -1911,27 +1925,33 @@ async def delete_personal_asignado(actividad_id: str, body: PersonalAsignadoItem
             if not matching:
                 raise HTTPException(status_code=404, detail=f"No se encontró actividad con id: {actividad_id}")
             doc_ref = collection_ref.document(matching.id)
+            doc_snap = doc_ref.get()
 
-        personal_a_eliminar = {
-            "nombre_completo": body.nombre_completo.strip(),
-            "email": body.email.strip(),
-            "numero_contacto": body.numero_contacto,
-            "grupo": body.grupo.strip(),
-        }
+        data = doc_snap.to_dict() or {}
+        personal_actual = data.get("personal_asignado", [])
 
-        doc_ref.update({
-            "personal_asignado": firestore.ArrayRemove([personal_a_eliminar])
-        })
+        personal_filtrado = []
+        emails_eliminados = []
 
-        updated = doc_ref.get().to_dict() or {}
-        total = len(updated.get("personal_asignado", []))
+        for p in personal_actual:
+            email_p = (p.get("email") or "").strip().lower()
+            if email_p in emails_a_eliminar:
+                emails_eliminados.append(email_p)
+            else:
+                personal_filtrado.append(p)
+
+        emails_no_encontrados = list(emails_a_eliminar - set(emails_eliminados))
+
+        # Sobreescribir el array completo con los registros que se conservan
+        doc_ref.update({"personal_asignado": personal_filtrado})
 
         return {
             "success": True,
-            "message": "Personal eliminado de la actividad",
+            "message": f"Se eliminaron {len(emails_eliminados)} de {len(emails_a_eliminar)} emails solicitados",
             "actividad_id": actividad_id,
-            "personal_eliminado": personal_a_eliminar,
-            "total_personal": total,
+            "emails_eliminados": emails_eliminados,
+            "emails_no_encontrados": emails_no_encontrados,
+            "total_personal": len(personal_filtrado),
             "timestamp": datetime.now(pytz.timezone("America/Bogota")).isoformat(),
         }
     except HTTPException:
