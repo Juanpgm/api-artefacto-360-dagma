@@ -1099,115 +1099,65 @@ async def get_reportes_umata_legacy(
     return await _get_reportes_intervenciones(grupo_key="umata", id=id, id_actividad=id_actividad, grupo=grupo)
 
 
-# ==================== ENDPOINT 1: Inicialización de Parques ====================#
-@router.get(
-    "/init/parques",
-    summary="🔵 GET | Inicialización de Parques",
-    description="""
-## 🔵 GET | Inicialización de Parques para DAGMA
-
-**Propósito**: Obtener datos iniciales de parques para el artefacto de captura DAGMA.
-
-### ✅ Respuesta
-Retorna información de parques y zonas verdes del sistema.
-
-### 📝 Ejemplo de uso:
-```javascript
-const response = await fetch('/init/parques');
-const data = await response.json();
-```
-    """,
-)
-async def get_init_parques():
-    """
-    Obtener datos iniciales de parques para DAGMA
-    """
-    try:
-        # Obtener datos de la colección 'parques' en Firebase
-        parques_ref = db.collection('parques')
-        docs = parques_ref.stream()
-        
-        # Convertir los documentos a lista de diccionarios
-        parques = []
-        for doc in docs:
-            parque_data = doc.to_dict()
-            parque_data['id'] = doc.id  # Agregar el ID del documento
-            
-            # Limpiar valores NaN e infinitos
-            parque_data = clean_nan_values(parque_data)
-            
-            parques.append(parque_data)
-        
-        return {
-            "success": True,
-            "data": parques,
-            "count": len(parques),
-            "timestamp": datetime.now(timezone.utc).isoformat()
-        }
-    except Exception as e:
-        raise HTTPException(
-            status_code=500,
-            detail=f"Error obteniendo parques: {str(e)}"
-        )
-
-
 
 # ==================== ENDPOINT 4: Obtener Líderes por Grupo ======================================#
 @router.get(
-    "/lideres_grupo",
-    summary="🔵 GET | Obtener Líderes de Grupo",
+    "/grupos",
+    summary="🔵 GET | Obtener Grupos",
     description="""
-## 🔵 GET | Obtener Líderes de Grupo
+## 🔵 GET | Obtener Grupos
 
-**Propósito**: Consultar líderes desde la colección `lideres_grupos` en Firebase.
+**Propósito**: Consultar grupos desde la colección `grupos` en Firebase.
+Cada grupo incluye su nombre, correo institucional y líder asignado.
 
 ### 📥 Parámetros
-- **grupo** (opcional): Filtrar líderes por nombre de grupo (coincidencia exacta)
+- **grupo** (opcional): Filtrar por nombre de grupo (coincidencia exacta)
 
 ### 📝 Ejemplos de uso:
 ```javascript
-// Obtener todos los líderes
-fetch('/lideres_grupo');
+// Obtener todos los grupos
+fetch('/grupos');
 
 // Filtrar por grupo
-fetch('/lideres_grupo?grupo=Grupo 1');
+fetch('/grupos?grupo=Vivero');
 ```
-    """
+    """,
+    tags=["Artefacto de Captura DAGMA"],
 )
-async def get_lideres_grupo(
+async def get_grupos(
     grupo: Optional[str] = Query(None, min_length=1, description="Filtrar por nombre de grupo")
 ):
     """
-    Obtener líderes de la colección lideres_grupos con filtro opcional por grupo
+    Obtener grupos de la colección `grupos` con filtro opcional por nombre.
     """
     try:
-        lideres_ref = db.collection('lideres_grupos')
-        query = lideres_ref
+        ref = db.collection("grupos")
+        query = ref
 
         if grupo:
-            query = query.where('grupo', '==', grupo.strip())
+            query = query.where("nombre", "==", grupo.strip())
 
         docs = query.stream()
 
-        lideres = []
+        grupos = []
         for doc in docs:
             data = doc.to_dict()
-            data['id'] = doc.id
-            lideres.append(data)
+            data["id"] = doc.id
+            grupos.append(data)
 
         return {
-            "success": True,
-            "data": lideres,
-            "count": len(lideres),
+            "status": "success",
+            "data": grupos,
+            "count": len(grupos),
             "filters": {
                 "grupo": grupo.strip() if grupo else None
             },
-            "timestamp": datetime.now(timezone.utc).isoformat()
+            "timestamp": datetime.now(pytz.timezone("America/Bogota")).isoformat(),
         }
     except Exception as e:
         raise HTTPException(
             status_code=500,
-            detail=f"Error obteniendo líderes por grupo: {str(e)}"
+            detail=f"Error obteniendo grupos: {str(e)}"
         )
 
 
@@ -1787,78 +1737,121 @@ async def update_plan_distrito_verde(actividad_id: str, body: dict):
         )
 
 
-@router.delete(
-    "/grupo-operativo/eliminar-reporte",
-    summary="🔴 DELETE | Eliminar Reporte",
+# ==================== ENDPOINT: Personal Operativo ======================================#
+
+class PersonalOperativoRequest(BaseModel):
+    nombre_completo: str = Field(..., min_length=1, description="Nombre completo del personal operativo")
+    email: str = Field(..., min_length=1, description="Correo electrónico")
+    numero_contacto: int = Field(..., description="Número de contacto")
+    grupo: str = Field(..., min_length=1, description="Grupo operativo al que pertenece")
+
+
+@router.post(
+    "/personal_operativo",
+    summary="🟢 POST | Crear Personal Operativo",
     description="""
-## 🔴 DELETE | Eliminar Reporte del Grupo Operativo
+## 🟢 POST | Crear Personal Operativo
 
-**Propósito**: Eliminar un reporte específico del sistema, incluyendo las fotos en S3.
+**Propósito**: Registrar un nuevo integrante de personal operativo en la colección `personal_operativo` de Firebase.
 
-### 📥 Parámetros
-- **reporte_id**: ID único del reporte a eliminar
+### 📥 Body (JSON)
+- **nombre_completo**: Nombre completo del personal
+- **email**: Correo electrónico
+- **numero_contacto**: Número de contacto (entero)
+- **grupo**: Nombre del grupo operativo
 
-### 🗑️ Acciones realizadas:
-1. Eliminar imágenes del bucket S3 (360-dagma-photos)
-2. Eliminar documento de Firebase (reconocimientos_dagma)
-
-### 📝 Ejemplo de uso:
-```javascript
-const response = await fetch('/grupo-operativo/eliminar-reporte?reporte_id=abc-123', {
-    method: 'DELETE'
-});
-```
-
-### ✅ Respuesta exitosa:
+### ✅ Respuesta exitosa
 ```json
 {
-    "success": true,
-    "id": "abc-123",
-    "message": "Reporte y fotos eliminados exitosamente",
-    "photos_deleted": 3,
-    "timestamp": "2026-01-24T..."
+  "status": "success",
+  "message": "Personal operativo creado exitosamente",
+  "data": { "id": "...", "nombre_completo": "...", ... },
+  "timestamp": "..."
 }
 ```
-    """
+    """,
+    tags=["Artefacto de Captura DAGMA"],
 )
-async def delete_reporte(
-    reporte_id: str = Query(..., description="ID del reporte a eliminar")
-):
+async def crear_personal_operativo(body: PersonalOperativoRequest):
     """
-    Eliminar un reporte del grupo operativo
+    Crear un registro de personal operativo en Firebase.
     """
     try:
-        # TODO: Implementar eliminación de fotos en S3
-        # s3_client = boto3.client('s3')
-        # bucket = '360-dagma-photos'
-        # prefix = f'reconocimientos/{reporte_id}/'
-        
-        # Listar y eliminar objetos en S3
-        # response = s3_client.list_objects_v2(Bucket=bucket, Prefix=prefix)
-        # photos_deleted = 0
-        
-        # if 'Contents' in response:
-        #     for obj in response['Contents']:
-        #         s3_client.delete_object(Bucket=bucket, Key=obj['Key'])
-        #         photos_deleted += 1
-        
-        photos_deleted = 0
-        
-        # TODO: Eliminar documento de Firebase
-        # db.collection('reconocimientos_dagma').document(reporte_id).delete()
-        
-        return {
-            "success": True,
-            "id": reporte_id,
-            "message": "Reporte y fotos eliminados exitosamente",
-            "photos_deleted": photos_deleted,
-            "timestamp": datetime.now(timezone.utc).isoformat()
-        }
-        
-    except Exception as e:
-        raise HTTPException(
-            status_code=500,
-            detail=f"Error eliminando reporte: {str(e)}"
-        )
+        colombia_tz = pytz.timezone("America/Bogota")
+        nuevo_id = str(uuid.uuid4())
+        ahora = datetime.now(colombia_tz).isoformat()
 
+        doc_data = {
+            "id": nuevo_id,
+            "nombre_completo": body.nombre_completo.strip(),
+            "email": body.email.strip(),
+            "numero_contacto": body.numero_contacto,
+            "grupo": body.grupo.strip(),
+            "fecha_creacion": ahora,
+        }
+
+        db.collection("personal_operativo").document(nuevo_id).set(doc_data)
+
+        return {
+            "status": "success",
+            "message": "Personal operativo creado exitosamente",
+            "data": doc_data,
+            "timestamp": ahora,
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error creando personal operativo: {str(e)}")
+
+
+@router.get(
+    "/personal_operativo",
+    summary="🔵 GET | Obtener Personal Operativo",
+    description="""
+## 🔵 GET | Obtener Personal Operativo
+
+**Propósito**: Consultar todos los registros de la colección `personal_operativo` en Firebase.
+
+### 📥 Parámetros
+- **grupo** (opcional): Filtrar por nombre de grupo (coincidencia exacta)
+
+### 📝 Ejemplos de uso:
+```javascript
+// Todos los integrantes
+fetch('/personal_operativo');
+
+// Filtrar por grupo
+fetch('/personal_operativo?grupo=Cuadrilla');
+```
+    """,
+    tags=["Artefacto de Captura DAGMA"],
+)
+async def get_personal_operativo(
+    grupo: Optional[str] = Query(None, min_length=1, description="Filtrar por nombre de grupo"),
+):
+    """
+    Obtener personal operativo con filtro opcional por grupo.
+    """
+    try:
+        ref = db.collection("personal_operativo")
+        query = ref
+
+        if grupo:
+            query = query.where("grupo", "==", grupo.strip())
+
+        docs = query.stream()
+
+        personal = []
+        for doc in docs:
+            data = doc.to_dict()
+            data["id"] = doc.id
+            personal.append(data)
+
+        return {
+            "status": "success",
+            "data": personal,
+            "count": len(personal),
+            "filters": {"grupo": grupo.strip() if grupo else None},
+            "timestamp": datetime.now(pytz.timezone("America/Bogota")).isoformat(),
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error obteniendo personal operativo: {str(e)}")
 
