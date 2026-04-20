@@ -16,7 +16,6 @@ from pydantic import BaseModel, Field
 
 # Importar configuración de Firebase y S3/Storage
 from app.firebase_config import db
-from firebase_admin import firestore
 import boto3
 from botocore.exceptions import ClientError
 
@@ -1574,7 +1573,8 @@ const response = await fetch('/actividades/abc-123', {
 )
 async def update_actividad(actividad_id: str, body: dict):
     """
-    Actualizar una actividad con los campos especificados
+    Actualizar una actividad con los campos especificados.
+    Si body incluye personal_asignado, dispara notificaciones (email + Calendar).
     """
     try:
         if not body:
@@ -1585,39 +1585,80 @@ async def update_actividad(actividad_id: str, body: dict):
 
         collection_ref = db.collection("plan_distrito_verde")
 
-        # Intentar primero por ID de documento
+        # Resolver documento
         doc_ref = collection_ref.document(actividad_id)
         doc_snapshot = doc_ref.get()
 
-        if doc_snapshot.exists:
-            doc_ref.update(body)
-            updated_doc = doc_ref.get()
-            updated_data = updated_doc.to_dict() or {}
-            updated_data['id'] = actividad_id
-            
-            return {
-                "success": True,
-                "id": actividad_id,
-                "message": "Actividad actualizada exitosamente",
-                "data": updated_data,
-                "timestamp": datetime.now(timezone.utc).isoformat()
-            }
+        if not doc_snapshot.exists:
+            docs = collection_ref.where("id", "==", actividad_id).limit(1).stream()
+            matching_doc = next(docs, None)
+            if not matching_doc:
+                raise HTTPException(
+                    status_code=404,
+                    detail=f"No se encontró actividad con id: {actividad_id}"
+                )
+            doc_ref = collection_ref.document(matching_doc.id)
+            doc_snapshot = doc_ref.get()
 
-        # Fallback: buscar por campo interno 'id'
-        docs = collection_ref.where("id", "==", actividad_id).limit(1).stream()
-        matching_doc = next(docs, None)
+        # Datos anteriores (para detectar cambios en personal)
+        data_anterior = doc_snapshot.to_dict() or {}
 
-        if not matching_doc:
-            raise HTTPException(
-                status_code=404,
-                detail=f"No se encontró actividad con id: {actividad_id}"
-            )
-
-        doc_ref = collection_ref.document(matching_doc.id)
+        # Actualizar en Firestore
         doc_ref.update(body)
         updated_doc = doc_ref.get()
         updated_data = updated_doc.to_dict() or {}
         updated_data['id'] = actividad_id
+
+        # --- Si personal_asignado cambió, disparar notificaciones ---
+        if "personal_asignado" in body:
+            personal_nuevo = body["personal_asignado"] or []
+            personal_anterior = data_anterior.get("personal_asignado", [])
+            actividad_data = data_anterior
+
+            emails_anteriores = {(p.get("email") or "").strip().lower() for p in personal_anterior}
+            emails_nuevos = {(p.get("email") or "").strip().lower() for p in personal_nuevo}
+            emails_agregados = emails_nuevos - emails_anteriores
+            emails_eliminados = emails_anteriores - emails_nuevos
+
+            # Calendar: síncrono (actualiza descripción del evento)
+            calendar_event_id = actividad_data.get("calendar_event_id")
+            if calendar_event_id and (emails_agregados or emails_eliminados):
+                try:
+                    await asyncio.to_thread(sync_event_personnel, calendar_event_id, personal_nuevo)
+                except Exception as e:
+                    logger.warning(f"[CALENDAR] Error sincronizando personal en evento: {e}")
+
+            # Emails: background
+            mapa_nuevos = {(v.get("email") or "").strip().lower(): v for v in personal_nuevo}
+            mapa_anteriores = {(p.get("email") or "").strip().lower(): p for p in personal_anterior}
+
+            async def _enviar_emails_update():
+                email_tasks = []
+                for email in emails_agregados:
+                    persona = mapa_nuevos.get(email, {})
+                    email_tasks.append(asyncio.to_thread(
+                        send_assignment_notification_email,
+                        person_email=email,
+                        nombre=persona.get("nombre_completo", ""),
+                        grupo=persona.get("grupo", ""),
+                        actividad_data=actividad_data,
+                    ))
+                for email in emails_eliminados:
+                    persona = mapa_anteriores.get(email, {})
+                    email_tasks.append(asyncio.to_thread(
+                        send_removal_notification_email,
+                        person_email=email,
+                        nombre=persona.get("nombre_completo", ""),
+                        actividad_data=actividad_data,
+                    ))
+                for task in email_tasks:
+                    try:
+                        await task
+                    except Exception as e:
+                        logger.warning(f"[GMAIL] Error en notificación: {e}")
+
+            if emails_agregados or emails_eliminados:
+                asyncio.ensure_future(_enviar_emails_update())
 
         return {
             "success": True,
@@ -1633,314 +1674,6 @@ async def update_actividad(actividad_id: str, body: dict):
             status_code=500,
             detail=f"Error actualizando actividad: {str(e)}"
         )
-
-
-# ==================== ENDPOINT: PATCH Personal Asignado en Actividad ========================#
-
-class PersonalAsignadoItem(BaseModel):
-    nombre_completo: str = Field(..., min_length=1, description="Nombre completo")
-    email: str = Field(..., min_length=1, description="Correo electrónico")
-    numero_contacto: int = Field(..., description="Número de contacto")
-    grupo: str = Field(..., min_length=1, description="Grupo operativo")
-
-
-@router.patch(
-    "/actividades/{actividad_id}/personal_asignado",
-    summary="🟠 PATCH | Agregar Personal Asignado a Actividad",
-    description="""
-## 🟠 PATCH | Agregar Personal Asignado a Actividad
-
-**Propósito**: Agrega un integrante al array `personal_asignado` dentro del documento de la actividad
-en la colección `plan_distrito_verde`. Si el campo no existe, lo crea automáticamente.
-
-### 📥 Path
-- **actividad_id**: ID de la actividad
-
-### 📥 Body (JSON)
-```json
-{
-  "nombre_completo": "Juan Pérez",
-  "email": "juan@cali.gov.co",
-  "numero_contacto": 3001234567,
-  "grupo": "Cuadrilla"
-}
-```
-
-### ✅ Respuesta
-```json
-{
-  "success": true,
-  "message": "Personal agregado a la actividad",
-  "actividad_id": "...",
-  "personal_agregado": { ... },
-  "total_personal": 3,
-  "timestamp": "..."
-}
-```
-    """,
-    tags=["Artefacto de Captura DAGMA"],
-)
-async def patch_personal_asignado(actividad_id: str, body: PersonalAsignadoItem):
-    """
-    Agrega un integrante al campo personal_asignado de una actividad.
-    Crea el array si no existe.
-    """
-    try:
-        collection_ref = db.collection("plan_distrito_verde")
-
-        # Resolver el documento
-        doc_ref = collection_ref.document(actividad_id)
-        doc_snap = doc_ref.get()
-
-        if not doc_snap.exists:
-            # Fallback: buscar por campo interno 'id'
-            docs = collection_ref.where("id", "==", actividad_id).limit(1).stream()
-            matching = next(docs, None)
-            if not matching:
-                raise HTTPException(status_code=404, detail=f"No se encontró actividad con id: {actividad_id}")
-            doc_ref = collection_ref.document(matching.id)
-            doc_snap = doc_ref.get()
-
-        nuevo_personal = {
-            "nombre_completo": body.nombre_completo.strip(),
-            "email": body.email.strip(),
-            "numero_contacto": body.numero_contacto,
-            "grupo": body.grupo.strip(),
-        }
-
-        # ArrayUnion crea el campo si no existe, y agrega sin duplicar objetos idénticos
-        doc_ref.update({
-            "personal_asignado": firestore.ArrayUnion([nuevo_personal])
-        })
-
-        # Calcular total sin leer de nuevo (doc_snap ya tiene el array previo)
-        personal_previo = (doc_snap.to_dict() or {}).get("personal_asignado", [])
-        ya_existia = any(
-            p.get("email", "").strip().lower() == nuevo_personal["email"].lower()
-            for p in personal_previo
-        )
-        total = len(personal_previo) if ya_existia else len(personal_previo) + 1
-
-        # --- Calendar: síncrono (actualiza descripción del evento) ---
-        actividad_data = doc_snap.to_dict() or {}
-        calendar_event_id = actividad_data.get("calendar_event_id")
-        calendar_ok = None
-        if calendar_event_id:
-            # Construir lista completa de personal (previo + nuevo si no existía)
-            personal_completo = list(personal_previo)
-            if not ya_existia:
-                personal_completo.append(nuevo_personal)
-            try:
-                calendar_ok = await asyncio.to_thread(sync_event_personnel, calendar_event_id, personal_completo)
-            except Exception as e:
-                logger.warning(f"[CALENDAR] Error sincronizando personal en evento: {e}")
-                calendar_ok = False
-
-        # --- Email: background (no bloquea la respuesta) ---
-        async def _enviar_email_patch():
-            try:
-                await asyncio.to_thread(
-                    send_assignment_notification_email,
-                    person_email=nuevo_personal["email"],
-                    nombre=nuevo_personal["nombre_completo"],
-                    grupo=nuevo_personal["grupo"],
-                    actividad_data=actividad_data,
-                )
-            except Exception as e:
-                logger.warning(f"[GMAIL] Error notificando asignación a {nuevo_personal['email']}: {e}")
-
-        asyncio.ensure_future(_enviar_email_patch())
-
-        return {
-            "success": True,
-            "message": "Personal agregado a la actividad",
-            "actividad_id": actividad_id,
-            "personal_agregado": nuevo_personal,
-            "total_personal": total,
-            "calendar_actualizado": calendar_ok,
-            "timestamp": datetime.now(pytz.timezone("America/Bogota")).isoformat(),
-        }
-    except HTTPException:
-        raise
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Error agregando personal a actividad: {str(e)}")
-
-
-@router.put(
-    "/actividades/{actividad_id}/personal_asignado",
-    summary="🟡 PUT | Reemplazar Personal Asignado de Actividad",
-    description="""
-## 🟡 PUT | Reemplazar Personal Asignado de Actividad
-
-**Propósito**: Reemplaza completamente el array `personal_asignado` del documento de la actividad.
-El frontend obtiene la lista actual con GET, edita (agrega, elimina o modifica integrantes)
-y envía el array completo para sobreescribirlo en Firestore.
-
-### 📥 Path
-- **actividad_id**: ID de la actividad
-
-### 📥 Body (JSON)
-```json
-{
-  "personal_asignado": [
-    {
-      "nombre_completo": "Juan Pérez",
-      "email": "juan@cali.gov.co",
-      "numero_contacto": 3001234567,
-      "grupo": "Cuadrilla"
-    },
-    {
-      "nombre_completo": "María López",
-      "email": "maria@cali.gov.co",
-      "numero_contacto": 3009876543,
-      "grupo": "Vivero"
-    }
-  ]
-}
-```
-
-Para **vaciar** el personal, enviar array vacío:
-```json
-{ "personal_asignado": [] }
-```
-
-### ✅ Respuesta
-```json
-{
-  "success": true,
-  "message": "Personal asignado actualizado (2 integrantes)",
-  "actividad_id": "...",
-  "total_personal": 2,
-  "personal_asignado": [...],
-  "timestamp": "..."
-}
-```
-    """,
-    tags=["Artefacto de Captura DAGMA"],
-)
-async def put_personal_asignado(actividad_id: str, body: dict):
-    """
-    Reemplaza el array personal_asignado completo.
-    Valida que cada entrada tenga email y nombre_completo como mínimo.
-    """
-    try:
-        personal_nuevo = body.get("personal_asignado")
-        if personal_nuevo is None or not isinstance(personal_nuevo, list):
-            raise HTTPException(
-                status_code=400,
-                detail='Debe enviar { "personal_asignado": [ ... ] } como array'
-            )
-
-        validados = []
-        emails_vistos = set()
-        for i, p in enumerate(personal_nuevo):
-            if not isinstance(p, dict):
-                raise HTTPException(status_code=400, detail=f"Entrada {i} no es un objeto válido")
-            email = (p.get("email") or "").strip().lower()
-            nombre = (p.get("nombre_completo") or "").strip()
-            if not email:
-                raise HTTPException(status_code=400, detail=f"Entrada {i} no tiene email")
-            if not nombre:
-                raise HTTPException(status_code=400, detail=f"Entrada {i} no tiene nombre_completo")
-            if email in emails_vistos:
-                raise HTTPException(status_code=400, detail=f"Email duplicado en la lista: {email}")
-            emails_vistos.add(email)
-            validados.append({
-                "nombre_completo": nombre,
-                "email": email,
-                "numero_contacto": p.get("numero_contacto", 0),
-                "grupo": (p.get("grupo") or "").strip(),
-            })
-
-        collection_ref = db.collection("plan_distrito_verde")
-
-        doc_ref = collection_ref.document(actividad_id)
-        doc_snap = doc_ref.get()
-
-        if not doc_snap.exists:
-            docs = collection_ref.where("id", "==", actividad_id).limit(1).stream()
-            matching = next(docs, None)
-            if not matching:
-                raise HTTPException(status_code=404, detail=f"No se encontró actividad con id: {actividad_id}")
-            doc_ref = collection_ref.document(matching.id)
-            doc_snap = doc_ref.get()
-
-        # Obtener personal anterior para calcular diff
-        data_anterior = doc_snap.to_dict() or {}
-        personal_anterior = data_anterior.get("personal_asignado", [])
-        emails_anteriores = {(p.get("email") or "").strip().lower() for p in personal_anterior}
-        emails_nuevos = {v["email"] for v in validados}
-
-        emails_agregados = emails_nuevos - emails_anteriores
-        emails_eliminados = emails_anteriores - emails_nuevos
-
-        # Sobreescribir el array
-        doc_ref.update({"personal_asignado": validados})
-
-        # Datos de la actividad para notificaciones
-        actividad_data = data_anterior
-        calendar_event_id = actividad_data.get("calendar_event_id")
-
-        # Mapas auxiliares para buscar nombre/grupo
-        mapa_nuevos = {v["email"]: v for v in validados}
-        mapa_anteriores = {(p.get("email") or "").strip().lower(): p for p in personal_anterior}
-
-        # --- Calendar: síncrono (actualiza descripción del evento) ---
-        calendar_ok = None
-        if calendar_event_id and (emails_agregados or emails_eliminados):
-            try:
-                calendar_ok = await asyncio.to_thread(
-                    sync_event_personnel,
-                    calendar_event_id,
-                    validados,
-                )
-            except Exception as e:
-                logger.warning(f"[CALENDAR] Error sincronizando personal en evento: {e}")
-                calendar_ok = False
-
-        # --- Emails: background (no bloquean la respuesta) ---
-        async def _enviar_emails_put():
-            email_tasks = []
-            for email in emails_agregados:
-                persona = mapa_nuevos.get(email, {})
-                email_tasks.append(asyncio.to_thread(
-                    send_assignment_notification_email,
-                    person_email=email,
-                    nombre=persona.get("nombre_completo", ""),
-                    grupo=persona.get("grupo", ""),
-                    actividad_data=actividad_data,
-                ))
-            for email in emails_eliminados:
-                persona = mapa_anteriores.get(email, {})
-                email_tasks.append(asyncio.to_thread(
-                    send_removal_notification_email,
-                    person_email=email,
-                    nombre=persona.get("nombre_completo", ""),
-                    actividad_data=actividad_data,
-                ))
-            for task in email_tasks:
-                try:
-                    await task
-                except Exception as e:
-                    logger.warning(f"[GMAIL] Error en notificación PUT: {e}")
-
-        asyncio.ensure_future(_enviar_emails_put())
-
-        return {
-            "success": True,
-            "message": f"Personal asignado actualizado ({len(validados)} integrantes)",
-            "actividad_id": actividad_id,
-            "total_personal": len(validados),
-            "personal_asignado": validados,
-            "agregados": list(emails_agregados),
-            "eliminados": list(emails_eliminados),
-            "calendar_actualizado": calendar_ok,
-            "timestamp": datetime.now(pytz.timezone("America/Bogota")).isoformat(),
-        }
-    except HTTPException:
-        raise
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Error actualizando personal asignado: {str(e)}")
 
 
 # ==================== ENDPOINT: Personal Operativo ======================================#

@@ -103,57 +103,14 @@ def _activity_details_table(actividad_data: dict) -> str:
 
 
 def _calendar_button(actividad_data: dict) -> str:
-    """Genera botón 'Agregar a Google Calendar' con enlace directo (no requiere .ics)."""
-    from datetime import datetime, timedelta
-    from urllib.parse import quote
-
-    fecha = actividad_data.get('fecha_actividad', '')
-    hora = actividad_data.get('hora_encuentro', '')
-    try:
-        dt_inicio = datetime.strptime(f"{fecha} {hora}", "%d/%m/%Y %H:%M")
-    except Exception:
-        return ''  # sin fecha válida, no mostrar botón
-
-    duracion = float(actividad_data.get('duracion_actividad') or 2)
-    dt_fin = dt_inicio + timedelta(hours=duracion)
-
-    # Formato Google Calendar: YYYYMMDDTHHmmss (hora local Colombia, Google la interpreta con TZ)
-    fmt = "%Y%m%dT%H%M%S"
-    dates = f"{dt_inicio.strftime(fmt)}/{dt_fin.strftime(fmt)}"
-
-    titulo = actividad_data.get('objetivo_actividad', 'Actividad DAGMA')
-    punto = actividad_data.get('punto_encuentro') or {}
-    direccion = punto.get('direccion', '') if isinstance(punto, dict) else ''
-    grupos = ', '.join(actividad_data.get('grupos_requeridos') or [])
-    lider = actividad_data.get('lider_actividad', '')
-    telefono = actividad_data.get('telefono', '')
-    maps_url = _google_maps_url(actividad_data)
-
-    detalles = (
-        f"Tipo de jornada: {actividad_data.get('tipo_jornada', '')}\n"
-        f"Grupos requeridos: {grupos}\n"
-        f"Líder: {lider}\n"
-        f"Teléfono: {telefono}"
-    )
-    if maps_url:
-        detalles += f"\nUbicación: {maps_url}"
-
-    gcal_url = (
-        "https://calendar.google.com/calendar/render?action=TEMPLATE"
-        f"&text={quote(f'Actividad DAGMA: {titulo}')}"
-        f"&dates={dates}"
-        f"&details={quote(detalles)}"
-        f"&location={quote(direccion)}"
-        f"&ctz=America/Bogota"
-    )
-
+    link = actividad_data.get('calendar_event_link', '')
+    if not link:
+        return ''
     return (
-        f'<p style="margin-top:20px;text-align:center;">'
-        f'<a href="{gcal_url}" target="_blank" '
-        f'style="background:#1a73e8;color:white;padding:12px 28px;'
-        f'text-decoration:none;border-radius:4px;font-family:Arial,sans-serif;font-size:15px;'
-        f'display:inline-block;">'
-        f'&#128197; Agregar a Google Calendar</a></p>'
+        f'<p style="margin-top:20px;">'
+        f'<a href="{link}" style="background:#1a73e8;color:white;padding:10px 24px;'
+        f'text-decoration:none;border-radius:4px;font-family:Arial,sans-serif;font-size:14px;">'
+        f'Ver evento en Google Calendar</a></p>'
     )
 
 
@@ -242,8 +199,8 @@ def send_assignment_notification_email(
             {_calendar_button(actividad_data)}
             {_maps_button(actividad_data)}
             <p style="margin-top:24px;">
-              Si usa <strong>Outlook</strong> o <strong>Apple Calendar</strong>, abra el archivo adjunto
-              <strong>actividad_dagma.ics</strong> para agregar la actividad a su calendario.
+              Abra el archivo adjunto <strong>actividad_dagma.ics</strong> para agregar esta actividad
+              a su Google Calendar, Outlook o Apple Calendar con recordatorio automático.
             </p>
             <p>
               Por favor, confírmele su asistencia al líder:<br>
