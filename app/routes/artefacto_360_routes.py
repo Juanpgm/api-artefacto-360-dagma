@@ -1,8 +1,9 @@
 ﻿"""
 Rutas para gestión de Artefacto de Captura DAGMA
 """
-from fastapi import APIRouter, HTTPException, Form, UploadFile, File, Query
+from fastapi import APIRouter, HTTPException, Form, UploadFile, File, Query, Response
 from typing import List, Optional
+import asyncio
 from datetime import datetime, timedelta, timezone
 import pytz
 import json
@@ -1125,7 +1126,8 @@ fetch('/grupos?grupo=Vivero');
     tags=["Artefacto de Captura DAGMA"],
 )
 async def get_grupos(
-    grupo: Optional[str] = Query(None, min_length=1, description="Filtrar por nombre de grupo")
+    response: Response,
+    grupo: Optional[str] = Query(None, min_length=1, description="Filtrar por nombre de grupo"),
 ):
     """
     Obtener grupos de la colección `grupos` con filtro opcional por nombre.
@@ -1145,6 +1147,7 @@ async def get_grupos(
             data["id"] = doc.id
             grupos.append(data)
 
+        response.headers["Cache-Control"] = "public, max-age=60"
         return {
             "status": "success",
             "data": grupos,
@@ -1172,41 +1175,40 @@ async def get_grupos(
 
 ### 📥 Parámetros
 - **id** (opcional): Filtrar por ID específico de la actividad
-
-### ✅ Respuesta
-Retorna lista de actividades con todos los detalles del plan de intervención.
+- **grupo** (opcional): Filtrar por grupo operativo (ej. `cuadrilla`)
+- **limit** (opcional): Número máximo de resultados por página (1-200, default 50)
+- **start_after** (opcional): ID del último documento recibido para paginación cursor
 
 ### 📝 Ejemplos de uso:
 ```javascript
-// Obtener todas las actividades
-fetch('/actividades_plan_distrito_verde');
+// Primera página
+fetch('/actividades_plan_distrito_verde?grupo=cuadrilla&limit=50');
 
-// Filtrar por ID específico
-fetch('/actividades_plan_distrito_verde?id=abc-123');
+// Página siguiente (cursor del último id recibido)
+fetch('/actividades_plan_distrito_verde?grupo=cuadrilla&limit=50&start_after=LAST_DOC_ID');
 ```
 
-### 📊 Estructura de datos retornados:
+### 📊 Respuesta paginada:
 ```json
 {
   "success": true,
-  "total": 5,
-  "data": [
-    {
-      "id": "doc-id",
-      "nombre": "Nombre de la actividad",
-      "descripcion": "Descripción...",
-      "ubicacion": "Lugar de ejecución",
-      ...otros campos
-    }
-  ],
-  "timestamp": "2026-02-14T10:30:00Z"
+  "total": 50,
+  "data": [...],
+  "next_cursor": "last-doc-id-or-null",
+  "timestamp": "..."
 }
 ```
     """
 )
-async def get_actividades_plan_distrito_verde(id: Optional[str] = Query(None, description="Filtrar por ID de actividad")):
+async def get_actividades_plan_distrito_verde(
+    response: Response,
+    id: Optional[str] = Query(None, description="Filtrar por ID de actividad"),
+    grupo: Optional[str] = Query(None, description="Filtrar por grupo operativo"),
+    limit: int = Query(50, ge=1, le=200, description="Resultados por página"),
+    start_after: Optional[str] = Query(None, description="ID del último doc recibido (cursor de paginación)"),
+):
     """
-    Obtener actividades del plan Distrito Verde de Firebase, opcionalmente filtradas por ID
+    Obtener actividades del plan Distrito Verde con filtro por grupo y paginación cursor.
     """
     try:
         def obtener_personal_asignado(actividad_document_id: str, actividad_id_interno: Optional[str] = None) -> list[dict]:
@@ -1233,26 +1235,26 @@ async def get_actividades_plan_distrito_verde(id: Optional[str] = Query(None, de
 
             return personal_encontrado
 
-        # Obtener referencia a la colección
         plan_ref = db.collection('plan_distrito_verde')
-        
-        # Si se proporciona un ID, filtrar por él
+
+        # Búsqueda por ID único — sin paginación
         if id:
-            # Intentar primero como ID de documento
             doc = plan_ref.document(id).get()
             if doc.exists:
                 data = doc.to_dict()
                 actividad_id_interno = data.get("id") if isinstance(data, dict) else None
                 data['id'] = doc.id
-                data['grupo'] = obtener_personal_asignado(doc.id, actividad_id_interno)
+                data['personal_asignado'] = obtener_personal_asignado(doc.id, actividad_id_interno)
+                response.headers["Cache-Control"] = "public, max-age=60"
                 return {
                     "success": True,
                     "total": 1,
                     "data": [data],
+                    "next_cursor": None,
                     "filters": {"id": id},
                     "timestamp": datetime.now(timezone.utc).isoformat()
                 }
-            
+
             # Fallback: buscar por campo interno 'id'
             docs = plan_ref.where("id", "==", id).stream()
             actividades = []
@@ -1260,45 +1262,61 @@ async def get_actividades_plan_distrito_verde(id: Optional[str] = Query(None, de
                 data = doc.to_dict()
                 actividad_id_interno = data.get("id") if isinstance(data, dict) else None
                 data['id'] = doc.id
-                data['grupo'] = obtener_personal_asignado(doc.id, actividad_id_interno)
+                data['personal_asignado'] = obtener_personal_asignado(doc.id, actividad_id_interno)
                 actividades.append(data)
-            
-            if not actividades:
-                return {
-                    "success": True,
-                    "total": 0,
-                    "data": [],
-                    "filters": {"id": id},
-                    "timestamp": datetime.now(timezone.utc).isoformat()
-                }
-            
+
+            response.headers["Cache-Control"] = "public, max-age=60"
             return {
                 "success": True,
                 "total": len(actividades),
                 "data": actividades,
+                "next_cursor": None,
                 "filters": {"id": id},
                 "timestamp": datetime.now(timezone.utc).isoformat()
             }
-        
-        # Si no hay filtro, obtener todos los documentos
-        docs = plan_ref.stream()
-        
+
+        # Construir query con filtros opcionales
+        query = plan_ref
+
+        if grupo:
+            query = query.where("grupo", "==", grupo.strip())
+
+        # Paginación cursor-based (Firestore no soporta OFFSET)
+        if start_after:
+            cursor_snap = plan_ref.document(start_after).get()
+            if cursor_snap.exists:
+                query = query.start_after(cursor_snap)
+
+        query = query.limit(limit)
+        docs = query.stream()
+
         actividades = []
+        last_doc_id = None
         for doc in docs:
             data = doc.to_dict()
             actividad_id_interno = data.get("id") if isinstance(data, dict) else None
-            # Agregar el ID del documento a los datos
             data['id'] = doc.id
-            data['grupo'] = obtener_personal_asignado(doc.id, actividad_id_interno)
+            data['personal_asignado'] = obtener_personal_asignado(doc.id, actividad_id_interno)
             actividades.append(data)
-        
+            last_doc_id = doc.id
+
+        # next_cursor solo si hubo resultados iguales al limit (puede haber más)
+        next_cursor = last_doc_id if len(actividades) == limit else None
+
+        response.headers["Cache-Control"] = "public, max-age=60"
         return {
             "success": True,
             "total": len(actividades),
             "data": actividades,
+            "next_cursor": next_cursor,
+            "filters": {
+                "grupo": grupo.strip() if grupo else None,
+                "limit": limit,
+                "start_after": start_after,
+            },
             "timestamp": datetime.now(timezone.utc).isoformat()
         }
-        
+
     except Exception as e:
         print(f"❌ Error obteniendo actividades: {str(e)}")
         raise HTTPException(
@@ -1825,6 +1843,7 @@ fetch('/personal_operativo?grupo=Cuadrilla');
     tags=["Artefacto de Captura DAGMA"],
 )
 async def get_personal_operativo(
+    response: Response,
     grupo: Optional[str] = Query(None, min_length=1, description="Filtrar por nombre de grupo"),
 ):
     """
@@ -1845,6 +1864,7 @@ async def get_personal_operativo(
             data["id"] = doc.id
             personal.append(data)
 
+        response.headers["Cache-Control"] = "public, max-age=60"
         return {
             "status": "success",
             "data": personal,
@@ -1854,4 +1874,111 @@ async def get_personal_operativo(
         }
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error obteniendo personal operativo: {str(e)}")
+
+
+# ==================== ENDPOINT: Reportes Intervenciones Unificado (todos los grupos) ============#
+
+_GRUPOS_KEYS = ["cuadrilla", "vivero", "gobernanza", "ecosistemas", "umata"]
+
+
+async def _fetch_grupo_reportes(grupo_key: str, id_actividad: Optional[str], grupo_filter: Optional[str]) -> tuple[str, list[dict]]:
+    """Fetches reports for a single group collection, returns (grupo_key, list_of_docs)."""
+    config = get_grupo_config(grupo_key)
+    collection_name = config["collection"]
+    try:
+        ref = db.collection(collection_name)
+        query = ref
+        if id_actividad:
+            query = query.where("id_actividad", "==", id_actividad.strip())
+        if grupo_filter:
+            query = query.where("grupo", "==", grupo_filter.strip())
+        docs = query.stream()
+        results = []
+        for doc in docs:
+            data = doc.to_dict()
+            data["id"] = doc.id
+            data["_grupo_key"] = grupo_key
+            results.append(data)
+        return grupo_key, results
+    except Exception as e:
+        logger.warning(f"[reportes_intervenciones] Error leyendo {collection_name}: {e}")
+        return grupo_key, []
+
+
+@router.get(
+    "/reportes_intervenciones",
+    summary="🔵 GET | Reportes de Intervención — Todos los Grupos",
+    description="""
+## 🔵 GET | Reportes de Intervención — Todos los Grupos
+
+**Propósito**: Devuelve reportes de intervención de los 5 grupos operativos en una sola llamada,
+usando consultas paralelas (`asyncio.gather`) a cada colección.
+
+### 📥 Parámetros
+- **grupo** (opcional): Filtrar a un solo grupo (`cuadrilla`, `vivero`, `gobernanza`, `ecosistemas`, `umata`)
+- **id_actividad** (opcional): Filtrar por ID de actividad en todos los grupos
+
+### ✅ Respuesta
+```json
+{
+  "status": "success",
+  "data": {
+    "cuadrilla": [...],
+    "vivero": [...],
+    "gobernanza": [...],
+    "ecosistemas": [...],
+    "umata": [...]
+  },
+  "totals": { "cuadrilla": 12, "vivero": 5, ... },
+  "total_general": 40,
+  "timestamp": "..."
+}
+```
+    """,
+    tags=["Artefacto de Captura DAGMA"],
+)
+async def get_reportes_intervenciones_todos(
+    response: Response,
+    grupo: Optional[str] = Query(None, description="Filtrar por grupo operativo (cuadrilla, vivero, gobernanza, ecosistemas, umata)"),
+    id_actividad: Optional[str] = Query(None, description="Filtrar por ID de actividad"),
+):
+    """
+    Retorna reportes de todos los grupos en paralelo con asyncio.gather.
+    """
+    if grupo and grupo.strip().lower() not in _GRUPOS_KEYS:
+        raise HTTPException(
+            status_code=400,
+            detail=f"grupo debe ser uno de: {', '.join(_GRUPOS_KEYS)}"
+        )
+
+    grupos_a_consultar = [grupo.strip().lower()] if grupo else _GRUPOS_KEYS
+
+    tasks = [
+        _fetch_grupo_reportes(g, id_actividad, None)
+        for g in grupos_a_consultar
+    ]
+
+    results = await asyncio.gather(*tasks)
+
+    data: dict[str, list] = {}
+    totals: dict[str, int] = {}
+    total_general = 0
+
+    for grupo_key, reportes in results:
+        data[grupo_key] = reportes
+        totals[grupo_key] = len(reportes)
+        total_general += len(reportes)
+
+    response.headers["Cache-Control"] = "public, max-age=60"
+    return {
+        "status": "success",
+        "data": data,
+        "totals": totals,
+        "total_general": total_general,
+        "filters": {
+            "grupo": grupo.strip().lower() if grupo else None,
+            "id_actividad": id_actividad.strip() if id_actividad else None,
+        },
+        "timestamp": datetime.now(pytz.timezone("America/Bogota")).isoformat(),
+    }
 

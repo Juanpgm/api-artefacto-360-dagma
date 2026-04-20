@@ -5,6 +5,7 @@ Configuración basada en gestor_proyecto_api
 import logging
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.middleware.gzip import GZipMiddleware
 from fastapi.responses import JSONResponse
 from slowapi import Limiter, _rate_limit_exceeded_handler
 from slowapi.util import get_remote_address
@@ -52,6 +53,9 @@ app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 
 # Agregar middleware de rate limiting
 app.add_middleware(SlowAPIMiddleware)
+
+# GZip: comprime respuestas JSON >= 1KB (~70% menos payload)
+app.add_middleware(GZipMiddleware, minimum_size=1000)
 
 # Configurar CORS
 app.add_middleware(

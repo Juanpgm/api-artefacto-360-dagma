@@ -1,0 +1,38 @@
+{
+  "indexes": [
+    {
+      "collectionGroup": "plan_distrito_verde",
+      "queryScope": "COLLECTION",
+      "fields": [
+        { "fieldPath": "grupo", "order": "ASCENDING" },
+        { "fieldPath": "fecha_actividad", "order": "ASCENDING" }
+      ]
+    },
+    {
+      "collectionGroup": "plan_distrito_verde",
+      "queryScope": "COLLECTION",
+      "fields": [
+        { "fieldPath": "estado_actividad", "order": "ASCENDING" },
+        { "fieldPath": "fecha_actividad", "order": "ASCENDING" }
+      ]
+    },
+    {
+      "collectionGroup": "plan_distrito_verde",
+      "queryScope": "COLLECTION",
+      "fields": [
+        { "fieldPath": "grupo", "order": "ASCENDING" },
+        { "fieldPath": "estado_actividad", "order": "ASCENDING" },
+        { "fieldPath": "fecha_actividad", "order": "ASCENDING" }
+      ]
+    },
+    {
+      "collectionGroup": "personal_asignado_actividad",
+      "queryScope": "COLLECTION",
+      "fields": [
+        { "fieldPath": "actividad_id", "order": "ASCENDING" },
+        { "fieldPath": "grupo", "order": "ASCENDING" }
+      ]
+    }
+  ],
+  "fieldOverrides": []
+}
