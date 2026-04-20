@@ -50,11 +50,21 @@ def _send_email(to: str, subject: str, html_body: str, ics_bytes: bytes = None) 
             part.add_header('Content-Type', 'text/calendar; method=REQUEST; charset=utf-8')
             msg.attach(part)
 
-        with smtplib.SMTP(cfg['host'], cfg['port']) as server:
-            server.ehlo()
-            server.starttls()
-            server.login(cfg['user'], cfg['password'])
-            server.sendmail(cfg['user'], to, msg.as_bytes())
+        port = cfg['port']
+        timeout = 15  # segundos
+
+        if port == 465:
+            # SSL directo (puerto 465)
+            with smtplib.SMTP_SSL(cfg['host'], port, timeout=timeout) as server:
+                server.login(cfg['user'], cfg['password'])
+                server.sendmail(cfg['user'], to, msg.as_bytes())
+        else:
+            # STARTTLS (puerto 587)
+            with smtplib.SMTP(cfg['host'], port, timeout=timeout) as server:
+                server.ehlo()
+                server.starttls()
+                server.login(cfg['user'], cfg['password'])
+                server.sendmail(cfg['user'], to, msg.as_bytes())
 
         logger.info(f"[SMTP] Email enviado a {to}")
         return True

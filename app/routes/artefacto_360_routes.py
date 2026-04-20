@@ -8,6 +8,9 @@ from datetime import datetime, timedelta, timezone
 import pytz
 import json
 import uuid
+
+# Conjunto para mantener referencias fuertes a background tasks (evita garbage collection)
+_background_tasks = set()
 import math
 import os
 import io
@@ -1634,40 +1637,45 @@ async def update_actividad(actividad_id: str, body: dict):
                 except Exception as e:
                     logger.warning(f"[CALENDAR] Error sincronizando personal en evento: {e}")
 
-            # Emails de asignación (await directo, no fire-and-forget)
+            # Emails de asignación/desasignación (background, no bloquea la respuesta)
             mapa_nuevos = {(v.get("email") or "").strip().lower(): v for v in personal_nuevo if v.get("email")}
             mapa_anteriores = {(p.get("email") or "").strip().lower(): p for p in personal_anterior if p.get("email")}
 
-            for email_addr in emails_agregados:
-                persona = mapa_nuevos.get(email_addr, {})
-                logger.info(f"[EMAIL] Enviando email de ASIGNACION a: {email_addr}")
-                try:
-                    result = await asyncio.to_thread(
-                        send_assignment_notification_email,
-                        person_email=email_addr,
-                        nombre=persona.get("nombre_completo", ""),
-                        grupo=persona.get("grupo", ""),
-                        actividad_data=actividad_data,
-                    )
-                    logger.info(f"[EMAIL] Resultado asignacion {email_addr}: {result}")
-                except Exception as e:
-                    logger.error(f"[EMAIL] Error enviando asignacion a {email_addr}: {e}", exc_info=True)
+            async def _enviar_emails():
+                for email_addr in emails_agregados:
+                    persona = mapa_nuevos.get(email_addr, {})
+                    logger.info(f"[EMAIL] Enviando email de ASIGNACION a: {email_addr}")
+                    try:
+                        result = await asyncio.to_thread(
+                            send_assignment_notification_email,
+                            person_email=email_addr,
+                            nombre=persona.get("nombre_completo", ""),
+                            grupo=persona.get("grupo", ""),
+                            actividad_data=actividad_data,
+                        )
+                        logger.info(f"[EMAIL] Resultado asignacion {email_addr}: {result}")
+                    except Exception as e:
+                        logger.error(f"[EMAIL] Error enviando asignacion a {email_addr}: {e}", exc_info=True)
 
-            for email_addr in emails_eliminados:
-                persona = mapa_anteriores.get(email_addr, {})
-                logger.info(f"[EMAIL] Enviando email de DESASIGNACION a: {email_addr}")
-                try:
-                    result = await asyncio.to_thread(
-                        send_removal_notification_email,
-                        person_email=email_addr,
-                        nombre=persona.get("nombre_completo", ""),
-                        actividad_data=actividad_data,
-                    )
-                    logger.info(f"[EMAIL] Resultado desasignacion {email_addr}: {result}")
-                except Exception as e:
-                    logger.error(f"[EMAIL] Error enviando desasignacion a {email_addr}: {e}", exc_info=True)
+                for email_addr in emails_eliminados:
+                    persona = mapa_anteriores.get(email_addr, {})
+                    logger.info(f"[EMAIL] Enviando email de DESASIGNACION a: {email_addr}")
+                    try:
+                        result = await asyncio.to_thread(
+                            send_removal_notification_email,
+                            person_email=email_addr,
+                            nombre=persona.get("nombre_completo", ""),
+                            actividad_data=actividad_data,
+                        )
+                        logger.info(f"[EMAIL] Resultado desasignacion {email_addr}: {result}")
+                    except Exception as e:
+                        logger.error(f"[EMAIL] Error enviando desasignacion a {email_addr}: {e}", exc_info=True)
 
-            if not emails_agregados and not emails_eliminados:
+            if emails_agregados or emails_eliminados:
+                task = asyncio.create_task(_enviar_emails())
+                _background_tasks.add(task)
+                task.add_done_callback(_background_tasks.discard)
+            else:
                 logger.info("[EMAIL] Sin cambios en personal_asignado, no se envian emails")
 
         return {
