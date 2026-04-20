@@ -1857,6 +1857,89 @@ async def patch_personal_asignado(actividad_id: str, body: PersonalAsignadoItem)
         raise HTTPException(status_code=500, detail=f"Error agregando personal a actividad: {str(e)}")
 
 
+@router.delete(
+    "/actividades/{actividad_id}/personal_asignado",
+    summary="🔴 DELETE | Eliminar Personal Asignado de Actividad",
+    description="""
+## 🔴 DELETE | Eliminar Personal Asignado de Actividad
+
+**Propósito**: Elimina un integrante del array `personal_asignado` dentro del documento de la actividad
+en la colección `plan_distrito_verde`.
+
+### 📥 Path
+- **actividad_id**: ID de la actividad
+
+### 📥 Body (JSON)
+Debe coincidir **exactamente** con el objeto almacenado:
+```json
+{
+  "nombre_completo": "Juan Pérez",
+  "email": "juan@cali.gov.co",
+  "numero_contacto": 3001234567,
+  "grupo": "Cuadrilla"
+}
+```
+
+### ✅ Respuesta
+```json
+{
+  "success": true,
+  "message": "Personal eliminado de la actividad",
+  "actividad_id": "...",
+  "personal_eliminado": { ... },
+  "total_personal": 2,
+  "timestamp": "..."
+}
+```
+    """,
+    tags=["Artefacto de Captura DAGMA"],
+)
+async def delete_personal_asignado(actividad_id: str, body: PersonalAsignadoItem):
+    """
+    Elimina un integrante del campo personal_asignado de una actividad.
+    El objeto debe coincidir exactamente con el almacenado en Firestore.
+    """
+    try:
+        collection_ref = db.collection("plan_distrito_verde")
+
+        doc_ref = collection_ref.document(actividad_id)
+        doc_snap = doc_ref.get()
+
+        if not doc_snap.exists:
+            docs = collection_ref.where("id", "==", actividad_id).limit(1).stream()
+            matching = next(docs, None)
+            if not matching:
+                raise HTTPException(status_code=404, detail=f"No se encontró actividad con id: {actividad_id}")
+            doc_ref = collection_ref.document(matching.id)
+
+        personal_a_eliminar = {
+            "nombre_completo": body.nombre_completo.strip(),
+            "email": body.email.strip(),
+            "numero_contacto": body.numero_contacto,
+            "grupo": body.grupo.strip(),
+        }
+
+        doc_ref.update({
+            "personal_asignado": firestore.ArrayRemove([personal_a_eliminar])
+        })
+
+        updated = doc_ref.get().to_dict() or {}
+        total = len(updated.get("personal_asignado", []))
+
+        return {
+            "success": True,
+            "message": "Personal eliminado de la actividad",
+            "actividad_id": actividad_id,
+            "personal_eliminado": personal_a_eliminar,
+            "total_personal": total,
+            "timestamp": datetime.now(pytz.timezone("America/Bogota")).isoformat(),
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error eliminando personal de actividad: {str(e)}")
+
+
 # ==================== ENDPOINT: Personal Operativo ======================================#
 
 class PersonalOperativoRequest(BaseModel):
