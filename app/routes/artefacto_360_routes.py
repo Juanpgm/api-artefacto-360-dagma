@@ -1613,14 +1613,20 @@ async def update_actividad(actividad_id: str, body: dict):
         if "personal_asignado" in body:
             personal_nuevo = body["personal_asignado"] or []
             personal_anterior = data_anterior.get("personal_asignado", [])
-            actividad_data = data_anterior
+            actividad_data = updated_data
 
-            emails_anteriores = {(p.get("email") or "").strip().lower() for p in personal_anterior}
-            emails_nuevos = {(p.get("email") or "").strip().lower() for p in personal_nuevo}
+            # Detectar asignados y desasignados comparando emails
+            emails_anteriores = {(p.get("email") or "").strip().lower() for p in personal_anterior if p.get("email")}
+            emails_nuevos = {(p.get("email") or "").strip().lower() for p in personal_nuevo if p.get("email")}
             emails_agregados = emails_nuevos - emails_anteriores
             emails_eliminados = emails_anteriores - emails_nuevos
 
-            # Calendar: síncrono (actualiza descripción del evento)
+            logger.info(f"[EMAIL] personal_asignado en body. "
+                        f"Anteriores({len(emails_anteriores)}): {emails_anteriores}, "
+                        f"Nuevos({len(emails_nuevos)}): {emails_nuevos}, "
+                        f"Agregados: {emails_agregados}, Eliminados: {emails_eliminados}")
+
+            # Calendar: actualizar evento si cambió personal
             calendar_event_id = actividad_data.get("calendar_event_id")
             if calendar_event_id and (emails_agregados or emails_eliminados):
                 try:
@@ -1628,37 +1634,41 @@ async def update_actividad(actividad_id: str, body: dict):
                 except Exception as e:
                     logger.warning(f"[CALENDAR] Error sincronizando personal en evento: {e}")
 
-            # Emails: background
-            mapa_nuevos = {(v.get("email") or "").strip().lower(): v for v in personal_nuevo}
-            mapa_anteriores = {(p.get("email") or "").strip().lower(): p for p in personal_anterior}
+            # Emails de asignación (await directo, no fire-and-forget)
+            mapa_nuevos = {(v.get("email") or "").strip().lower(): v for v in personal_nuevo if v.get("email")}
+            mapa_anteriores = {(p.get("email") or "").strip().lower(): p for p in personal_anterior if p.get("email")}
 
-            async def _enviar_emails_update():
-                email_tasks = []
-                for email in emails_agregados:
-                    persona = mapa_nuevos.get(email, {})
-                    email_tasks.append(asyncio.to_thread(
+            for email_addr in emails_agregados:
+                persona = mapa_nuevos.get(email_addr, {})
+                logger.info(f"[EMAIL] Enviando email de ASIGNACION a: {email_addr}")
+                try:
+                    result = await asyncio.to_thread(
                         send_assignment_notification_email,
-                        person_email=email,
+                        person_email=email_addr,
                         nombre=persona.get("nombre_completo", ""),
                         grupo=persona.get("grupo", ""),
                         actividad_data=actividad_data,
-                    ))
-                for email in emails_eliminados:
-                    persona = mapa_anteriores.get(email, {})
-                    email_tasks.append(asyncio.to_thread(
+                    )
+                    logger.info(f"[EMAIL] Resultado asignacion {email_addr}: {result}")
+                except Exception as e:
+                    logger.error(f"[EMAIL] Error enviando asignacion a {email_addr}: {e}", exc_info=True)
+
+            for email_addr in emails_eliminados:
+                persona = mapa_anteriores.get(email_addr, {})
+                logger.info(f"[EMAIL] Enviando email de DESASIGNACION a: {email_addr}")
+                try:
+                    result = await asyncio.to_thread(
                         send_removal_notification_email,
-                        person_email=email,
+                        person_email=email_addr,
                         nombre=persona.get("nombre_completo", ""),
                         actividad_data=actividad_data,
-                    ))
-                for task in email_tasks:
-                    try:
-                        await task
-                    except Exception as e:
-                        logger.warning(f"[GMAIL] Error en notificación: {e}")
+                    )
+                    logger.info(f"[EMAIL] Resultado desasignacion {email_addr}: {result}")
+                except Exception as e:
+                    logger.error(f"[EMAIL] Error enviando desasignacion a {email_addr}: {e}", exc_info=True)
 
-            if emails_agregados or emails_eliminados:
-                asyncio.ensure_future(_enviar_emails_update())
+            if not emails_agregados and not emails_eliminados:
+                logger.info("[EMAIL] Sin cambios en personal_asignado, no se envian emails")
 
         return {
             "success": True,
