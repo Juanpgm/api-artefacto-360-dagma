@@ -5,7 +5,7 @@ Gestión del ciclo de vida completo de reportes: estados, asignaciones, historia
 from fastapi import APIRouter, HTTPException, Query, Body, Depends
 from typing import List, Optional, Dict, Any
 from datetime import datetime, timezone, timedelta
-from pydantic import BaseModel, Field, validator
+from pydantic import BaseModel, Field, field_validator
 import uuid
 from firebase_admin import firestore
 
@@ -28,8 +28,9 @@ class EvidenciaInput(BaseModel):
     url: str = Field(..., description="URL de la evidencia en S3")
     descripcion: Optional[str] = Field(None, max_length=500, description="Descripción de la evidencia")
     
-    @validator('tipo')
-    def validate_tipo(cls, v):
+    @field_validator('tipo')
+    @classmethod
+    def validate_tipo(cls, v: str) -> str:
         if v not in ['foto', 'documento']:
             raise ValueError("El tipo debe ser 'foto' o 'documento'")
         return v
@@ -43,8 +44,9 @@ class AvanceInput(BaseModel):
     porcentaje: int = Field(..., ge=0, le=100, description="Porcentaje de avance")
     evidencias: Optional[List[EvidenciaInput]] = Field(default=[], description="Lista de evidencias")
     
-    @validator('estado_nuevo')
-    def validate_estado(cls, v):
+    @field_validator('estado_nuevo')
+    @classmethod
+    def validate_estado(cls, v: str) -> str:
         estados_validos = ['notificado', 'radicado', 'en-gestion', 'asignado', 'en-proceso', 'resuelto', 'cerrado']
         if v not in estados_validos:
             raise ValueError(f"Estado inválido. Valores permitidos: {', '.join(estados_validos)}")
@@ -61,8 +63,9 @@ class PrioridadInput(BaseModel):
     """Modelo para cambiar prioridad"""
     prioridad: str = Field(..., description="Nivel de prioridad")
     
-    @validator('prioridad')
-    def validate_prioridad(cls, v):
+    @field_validator('prioridad')
+    @classmethod
+    def validate_prioridad(cls, v: str) -> str:
         prioridades_validas = ['baja', 'media', 'alta', 'urgente']
         if v not in prioridades_validas:
             raise ValueError(f"Prioridad inválida. Valores permitidos: {', '.join(prioridades_validas)}")
