@@ -1875,6 +1875,109 @@ async def get_personal_operativo(
         raise HTTPException(status_code=500, detail=f"Error obteniendo personal operativo: {str(e)}")
 
 
+@router.patch(
+    "/personal_operativo/verificar-registro",
+    summary="🔄 PATCH | Verificar Registro en Users de Personal Operativo",
+    description="""
+## 🔄 PATCH | Verificar Registro en Users de Personal Operativo
+
+**Propósito**: Recorre la colección `personal_operativo`, compara el `email` de cada persona
+contra la colección `users` y actualiza el campo `estado_registro` de cada documento:
+
+- **"Usuario registrado"** — si el email existe en `users`
+- **"Usuario no registrado"** — si el email no existe en `users`
+
+### 📥 Parámetros (query)
+- **grupo** (opcional): limitar la verificación a un grupo específico
+
+### ✅ Respuesta exitosa
+```json
+{
+  "status": "success",
+  "total_procesados": 12,
+  "registrados": 8,
+  "no_registrados": 4,
+  "detalle": [
+    { "id": "...", "nombre_completo": "...", "email": "...", "estado_registro": "Usuario registrado" },
+    ...
+  ]
+}
+```
+    """,
+    tags=["Artefacto de Captura DAGMA"],
+)
+async def verificar_registro_personal(
+    grupo: Optional[str] = Query(None, description="Filtrar por grupo operativo"),
+    current_user: CurrentUser = Depends(require_min_role(Role.LIDER)),
+):
+    """
+    Verifica si cada persona en personal_operativo está registrada en users (por email)
+    y actualiza el campo estado_registro en cada documento.
+    Lider solo puede verificar su propio grupo.
+    """
+    try:
+        # Lider solo puede verificar su propio grupo
+        if not current_user.at_least(Role.ADMINISTRADOR) and current_user.grupo:
+            grupo = current_user.grupo
+
+        # 1. Obtener todos los emails registrados en users (índice en memoria)
+        users_query = db.collection("users").stream()
+        emails_registrados: set[str] = set()
+        for u in users_query:
+            u_data = u.to_dict() or {}
+            email_u = (u_data.get("email") or "").strip().lower()
+            if email_u:
+                emails_registrados.add(email_u)
+
+        # 2. Obtener personal_operativo (con filtro de grupo si aplica)
+        ref = db.collection("personal_operativo")
+        query = ref.where("grupo", "==", grupo.strip()) if grupo else ref
+        docs = list(query.stream())
+
+        colombia_tz = pytz.timezone("America/Bogota")
+        ahora = datetime.now(colombia_tz).isoformat()
+
+        detalle = []
+        registrados = 0
+        no_registrados = 0
+
+        for doc in docs:
+            data = doc.to_dict() or {}
+            email_p = (data.get("email") or "").strip().lower()
+            estado = "Usuario registrado" if email_p in emails_registrados else "Usuario no registrado"
+
+            # Actualizar campo en Firestore
+            db.collection("personal_operativo").document(doc.id).update({
+                "estado_registro": estado,
+                "estado_registro_verificado_en": ahora,
+            })
+
+            if estado == "Usuario registrado":
+                registrados += 1
+            else:
+                no_registrados += 1
+
+            detalle.append({
+                "id": doc.id,
+                "nombre_completo": data.get("nombre_completo"),
+                "email": data.get("email"),
+                "grupo": data.get("grupo"),
+                "estado_registro": estado,
+            })
+
+        return {
+            "status": "success",
+            "total_procesados": len(detalle),
+            "registrados": registrados,
+            "no_registrados": no_registrados,
+            "filtro_grupo": grupo.strip() if grupo else None,
+            "verificado_en": ahora,
+            "detalle": detalle,
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error verificando registro: {str(e)}")
+
+
 # ==================== ENDPOINT: Reportes Intervenciones Unificado (todos los grupos) ============#
 
 _GRUPOS_KEYS = ["cuadrilla", "vivero", "gobernanza", "ecosistemas", "umata"]
