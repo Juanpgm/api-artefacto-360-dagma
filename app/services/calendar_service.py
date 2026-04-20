@@ -83,79 +83,54 @@ def create_activity_event(actividad_data: dict, attendee_emails: list = None) ->
         return {}
 
 
-def add_attendee_to_event(calendar_event_id: str, attendee_email: str) -> bool:
+import re as _re
+
+_PERSONAL_SECTION_RE = _re.compile(
+    r'\n--- Personal asignado ---\n.*',
+    _re.DOTALL,
+)
+
+
+def sync_event_personnel(calendar_event_id: str, personal_asignado: list) -> bool:
     """
-    Agrega un asistente a un evento existente de Calendar.
-    Usa GET + PATCH para no sobreescribir asistentes previos.
-    Envía invitación de Calendar al nuevo asistente (sendUpdates='all').
-    Retorna True si tuvo éxito, False en caso de error (no propaga excepciones).
-    """
-    try:
-        service = _build_calendar_service()
-
-        existing_event = service.events().get(
-            calendarId=CALENDAR_ID,
-            eventId=calendar_event_id
-        ).execute()
-
-        current_attendees = existing_event.get('attendees', [])
-        existing_emails = {a.get('email', '').lower() for a in current_attendees}
-
-        if attendee_email.lower() in existing_emails:
-            logger.info(f"[CALENDAR] {attendee_email} ya es asistente del evento {calendar_event_id}")
-            return True
-
-        current_attendees.append({'email': attendee_email})
-
-        service.events().patch(
-            calendarId=CALENDAR_ID,
-            eventId=calendar_event_id,
-            body={'attendees': current_attendees},
-            sendUpdates='all'
-        ).execute()
-
-        logger.info(f"[CALENDAR] Asistente {attendee_email} agregado al evento {calendar_event_id}")
-        return True
-
-    except Exception as e:
-        logger.error(f"[CALENDAR] Error agregando {attendee_email} al evento {calendar_event_id}: {e}")
-        return False
-
-
-def remove_attendee_from_event(calendar_event_id: str, attendee_email: str) -> bool:
-    """
-    Elimina un asistente de un evento existente de Calendar.
-    Usa GET + PATCH para filtrar al asistente y actualizar la lista.
-    Retorna True si tuvo éxito, False en caso de error (no propaga excepciones).
+    Sincroniza la sección 'Personal asignado' en la descripción del evento Calendar.
+    Recibe la lista completa de personal_asignado (dicts con nombre_completo, email, grupo).
+    No usa attendees (service account sin Domain-Wide Delegation).
+    Retorna True si tuvo éxito, False en caso de error.
     """
     try:
         service = _build_calendar_service()
 
         existing_event = service.events().get(
             calendarId=CALENDAR_ID,
-            eventId=calendar_event_id
+            eventId=calendar_event_id,
         ).execute()
 
-        current_attendees = existing_event.get('attendees', [])
-        updated_attendees = [
-            a for a in current_attendees
-            if a.get('email', '').lower() != attendee_email.lower()
-        ]
+        description = existing_event.get('description', '') or ''
 
-        if len(updated_attendees) == len(current_attendees):
-            logger.info(f"[CALENDAR] {attendee_email} no era asistente del evento {calendar_event_id}")
-            return True
+        # Remover sección anterior si existe
+        description = _PERSONAL_SECTION_RE.sub('', description).rstrip()
+
+        # Construir nueva sección
+        if personal_asignado:
+            lines = ['\n--- Personal asignado ---']
+            for p in personal_asignado:
+                nombre = p.get('nombre_completo', '')
+                email = p.get('email', '')
+                grupo = p.get('grupo', '')
+                lines.append(f'- {nombre} ({email}) - {grupo}')
+            description += '\n' + '\n'.join(lines)
 
         service.events().patch(
             calendarId=CALENDAR_ID,
             eventId=calendar_event_id,
-            body={'attendees': updated_attendees},
-            sendUpdates='all'
+            body={'description': description},
+            sendUpdates='none',
         ).execute()
 
-        logger.info(f"[CALENDAR] Asistente {attendee_email} eliminado del evento {calendar_event_id}")
+        logger.info(f"[CALENDAR] Descripcion actualizada evento {calendar_event_id}: {len(personal_asignado)} personas")
         return True
 
     except Exception as e:
-        logger.error(f"[CALENDAR] Error eliminando {attendee_email} del evento {calendar_event_id}: {e}")
+        logger.error(f"[CALENDAR] Error actualizando descripcion evento {calendar_event_id}: {e}")
         return False

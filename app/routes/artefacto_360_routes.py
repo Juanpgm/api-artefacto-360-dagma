@@ -26,7 +26,7 @@ from app.services.gmail_service import (
     send_assignment_notification_email,
     send_removal_notification_email,
 )
-from app.services.calendar_service import create_activity_event, add_attendee_to_event, remove_attendee_from_event
+from app.services.calendar_service import create_activity_event, sync_event_personnel
 
 logger = logging.getLogger(__name__)
 
@@ -1373,22 +1373,6 @@ class ConvocarActividadResponse(BaseModel):
     data: dict
 
 
-class AsignarPersonalActividadRequest(BaseModel):
-    id: str = Field(..., min_length=1, description="ID de la actividad a la que se asigna el personal")
-    email: str = Field(..., min_length=1, description="Correo electrónico del personal")
-    grupo: str = Field(..., min_length=1, description="Grupo al que pertenece el personal")
-    nombre_completo: str = Field(..., min_length=1, description="Nombre completo del personal")
-    telefono: str = Field(..., min_length=1, description="Teléfono de contacto del personal")
-
-
-class AsignarPersonalActividadResponse(BaseModel):
-    success: bool
-    total_registros: int
-    ids: list[str]
-    message: str
-    marca_temporal: str
-    data: list[dict]
-
 @router.post(
     "/programar_actividad",
     summary="🟢 POST | Programar Actividad",
@@ -1477,127 +1461,6 @@ async def convocar_actividad(
         raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error programando actividad: {str(e)}")
-
-
-@router.post(
-    "/asignar_personal_actividad",
-    summary="🟢 POST | Asignar Personal a Actividad",
-    description="""
-## 🟢 POST | Asignar Personal a Actividad
-
-Registra personal asignado a una actividad del plan Distrito Verde.
-
-**Tag:** Artefacto de Captura DAGMA
-""",
-    tags=["Artefacto de Captura DAGMA"],
-    response_model=AsignarPersonalActividadResponse
-)
-async def asignar_personal_actividad(
-    body: List[AsignarPersonalActividadRequest] = Body(...)
-):
-    """
-    Asignar múltiples registros de personal a actividades y guardarlos en Firebase.
-    """
-    try:
-        if not body:
-            raise HTTPException(status_code=400, detail="Debe enviar al menos un registro de personal")
-
-        plan_ref = db.collection("plan_distrito_verde")
-        cache_actividades: dict[str, str] = {}
-        cache_actividad_data: dict[str, dict] = {}
-
-        def resolver_actividad_document_id(actividad_id: str) -> str:
-            if actividad_id in cache_actividades:
-                return cache_actividades[actividad_id]
-
-            actividad_doc_ref = plan_ref.document(actividad_id)
-            actividad_doc = actividad_doc_ref.get()
-
-            if actividad_doc.exists:
-                cache_actividades[actividad_id] = actividad_id
-                return actividad_id
-
-            docs = plan_ref.where("id", "==", actividad_id).limit(1).stream()
-            matching_doc = next(docs, None)
-            if not matching_doc:
-                raise HTTPException(
-                    status_code=404,
-                    detail=f"No se encontró actividad con id: {actividad_id}"
-                )
-
-            cache_actividades[actividad_id] = matching_doc.id
-            return matching_doc.id
-
-        tz_col = pytz.timezone("America/Bogota")
-        registros_guardados = []
-        ids_creados = []
-
-        for item in body:
-            actividad_id = item.id.strip()
-            if not actividad_id:
-                raise HTTPException(status_code=400, detail="El campo 'id' de actividad es obligatorio en todos los registros")
-
-            actividad_document_id = resolver_actividad_document_id(actividad_id)
-            marca_temporal = datetime.now(tz_col).isoformat()
-            asignacion_id = str(uuid.uuid4())
-
-            personal_data = {
-                "id": asignacion_id,
-                "actividad_id": actividad_id,
-                "actividad_document_id": actividad_document_id,
-                "email": item.email.strip(),
-                "grupo": item.grupo.strip(),
-                "nombre_completo": item.nombre_completo.strip(),
-                "telefono": item.telefono.strip(),
-                "marca_temporal": marca_temporal,
-            }
-
-            db.collection("personal_asignado_actividad").document(asignacion_id).set(personal_data)
-            registros_guardados.append(personal_data)
-            ids_creados.append(asignacion_id)
-
-            # Obtener datos de la actividad con cache (para email + calendar)
-            if actividad_document_id not in cache_actividad_data:
-                try:
-                    doc = db.collection("plan_distrito_verde").document(actividad_document_id).get()
-                    cache_actividad_data[actividad_document_id] = doc.to_dict() or {} if doc.exists else {}
-                except Exception:
-                    cache_actividad_data[actividad_document_id] = {}
-            actividad_doc_data = cache_actividad_data[actividad_document_id]
-
-            # Email de asignación (no bloqueante)
-            try:
-                send_assignment_notification_email(
-                    person_email=item.email.strip(),
-                    nombre=item.nombre_completo.strip(),
-                    grupo=item.grupo.strip(),
-                    actividad_data=actividad_doc_data
-                )
-            except Exception as e:
-                logger.warning(f"[GMAIL] Error notificando a {item.email}: {e}")
-
-            # Agregar como asistente al evento de Calendar (no bloqueante)
-            calendar_event_id = actividad_doc_data.get('calendar_event_id')
-            if calendar_event_id:
-                try:
-                    add_attendee_to_event(calendar_event_id, item.email.strip())
-                except Exception as e:
-                    logger.warning(f"[CALENDAR] Error agregando {item.email}: {e}")
-
-        marca_respuesta = datetime.now(tz_col).isoformat()
-
-        return AsignarPersonalActividadResponse(
-            success=True,
-            total_registros=len(registros_guardados),
-            ids=ids_creados,
-            message="Personal asignado a la actividad exitosamente",
-            marca_temporal=marca_respuesta,
-            data=registros_guardados
-        )
-    except HTTPException:
-        raise
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Error asignando personal a actividad: {str(e)}")
 
 
 @router.delete(
@@ -1850,28 +1713,43 @@ async def patch_personal_asignado(actividad_id: str, body: PersonalAsignadoItem)
             "personal_asignado": firestore.ArrayUnion([nuevo_personal])
         })
 
-        # Leer el doc actualizado para devolver el total
-        updated = doc_ref.get().to_dict() or {}
-        total = len(updated.get("personal_asignado", []))
+        # Calcular total sin leer de nuevo (doc_snap ya tiene el array previo)
+        personal_previo = (doc_snap.to_dict() or {}).get("personal_asignado", [])
+        ya_existia = any(
+            p.get("email", "").strip().lower() == nuevo_personal["email"].lower()
+            for p in personal_previo
+        )
+        total = len(personal_previo) if ya_existia else len(personal_previo) + 1
 
-        # --- Notificaciones (no bloqueantes) ---
-        actividad_data = updated
-        try:
-            send_assignment_notification_email(
-                person_email=nuevo_personal["email"],
-                nombre=nuevo_personal["nombre_completo"],
-                grupo=nuevo_personal["grupo"],
-                actividad_data=actividad_data,
-            )
-        except Exception as e:
-            logger.warning(f"[GMAIL] Error notificando asignación a {nuevo_personal['email']}: {e}")
-
+        # --- Calendar: síncrono (actualiza descripción del evento) ---
+        actividad_data = doc_snap.to_dict() or {}
         calendar_event_id = actividad_data.get("calendar_event_id")
+        calendar_ok = None
         if calendar_event_id:
+            # Construir lista completa de personal (previo + nuevo si no existía)
+            personal_completo = list(personal_previo)
+            if not ya_existia:
+                personal_completo.append(nuevo_personal)
             try:
-                add_attendee_to_event(calendar_event_id, nuevo_personal["email"])
+                calendar_ok = await asyncio.to_thread(sync_event_personnel, calendar_event_id, personal_completo)
             except Exception as e:
-                logger.warning(f"[CALENDAR] Error agregando {nuevo_personal['email']}: {e}")
+                logger.warning(f"[CALENDAR] Error sincronizando personal en evento: {e}")
+                calendar_ok = False
+
+        # --- Email: background (no bloquea la respuesta) ---
+        async def _enviar_email_patch():
+            try:
+                await asyncio.to_thread(
+                    send_assignment_notification_email,
+                    person_email=nuevo_personal["email"],
+                    nombre=nuevo_personal["nombre_completo"],
+                    grupo=nuevo_personal["grupo"],
+                    actividad_data=actividad_data,
+                )
+            except Exception as e:
+                logger.warning(f"[GMAIL] Error notificando asignación a {nuevo_personal['email']}: {e}")
+
+        asyncio.ensure_future(_enviar_email_patch())
 
         return {
             "success": True,
@@ -1879,6 +1757,7 @@ async def patch_personal_asignado(actividad_id: str, body: PersonalAsignadoItem)
             "actividad_id": actividad_id,
             "personal_agregado": nuevo_personal,
             "total_personal": total,
+            "calendar_actualizado": calendar_ok,
             "timestamp": datetime.now(pytz.timezone("America/Bogota")).isoformat(),
         }
     except HTTPException:
@@ -2006,40 +1885,46 @@ async def put_personal_asignado(actividad_id: str, body: dict):
         mapa_nuevos = {v["email"]: v for v in validados}
         mapa_anteriores = {(p.get("email") or "").strip().lower(): p for p in personal_anterior}
 
-        # --- Notificar personal AGREGADO ---
-        for email in emails_agregados:
-            persona = mapa_nuevos.get(email, {})
+        # --- Calendar: síncrono (actualiza descripción del evento) ---
+        calendar_ok = None
+        if calendar_event_id and (emails_agregados or emails_eliminados):
             try:
-                send_assignment_notification_email(
+                calendar_ok = await asyncio.to_thread(
+                    sync_event_personnel,
+                    calendar_event_id,
+                    validados,
+                )
+            except Exception as e:
+                logger.warning(f"[CALENDAR] Error sincronizando personal en evento: {e}")
+                calendar_ok = False
+
+        # --- Emails: background (no bloquean la respuesta) ---
+        async def _enviar_emails_put():
+            email_tasks = []
+            for email in emails_agregados:
+                persona = mapa_nuevos.get(email, {})
+                email_tasks.append(asyncio.to_thread(
+                    send_assignment_notification_email,
                     person_email=email,
                     nombre=persona.get("nombre_completo", ""),
                     grupo=persona.get("grupo", ""),
                     actividad_data=actividad_data,
-                )
-            except Exception as e:
-                logger.warning(f"[GMAIL] Error notificando asignación a {email}: {e}")
-            if calendar_event_id:
-                try:
-                    add_attendee_to_event(calendar_event_id, email)
-                except Exception as e:
-                    logger.warning(f"[CALENDAR] Error agregando {email}: {e}")
-
-        # --- Notificar personal ELIMINADO ---
-        for email in emails_eliminados:
-            persona = mapa_anteriores.get(email, {})
-            try:
-                send_removal_notification_email(
+                ))
+            for email in emails_eliminados:
+                persona = mapa_anteriores.get(email, {})
+                email_tasks.append(asyncio.to_thread(
+                    send_removal_notification_email,
                     person_email=email,
                     nombre=persona.get("nombre_completo", ""),
                     actividad_data=actividad_data,
-                )
-            except Exception as e:
-                logger.warning(f"[GMAIL] Error notificando desasignación a {email}: {e}")
-            if calendar_event_id:
+                ))
+            for task in email_tasks:
                 try:
-                    remove_attendee_from_event(calendar_event_id, email)
+                    await task
                 except Exception as e:
-                    logger.warning(f"[CALENDAR] Error eliminando {email}: {e}")
+                    logger.warning(f"[GMAIL] Error en notificación PUT: {e}")
+
+        asyncio.ensure_future(_enviar_emails_put())
 
         return {
             "success": True,
@@ -2049,6 +1934,7 @@ async def put_personal_asignado(actividad_id: str, body: dict):
             "personal_asignado": validados,
             "agregados": list(emails_agregados),
             "eliminados": list(emails_eliminados),
+            "calendar_actualizado": calendar_ok,
             "timestamp": datetime.now(pytz.timezone("America/Bogota")).isoformat(),
         }
     except HTTPException:
