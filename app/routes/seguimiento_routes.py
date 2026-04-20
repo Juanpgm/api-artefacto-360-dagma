@@ -2,7 +2,7 @@
 Rutas para Sistema de Seguimiento de Reportes/Reconocimientos DAGMA
 Gestión del ciclo de vida completo de reportes: estados, asignaciones, historial y estadísticas
 """
-from fastapi import APIRouter, HTTPException, Query, Body
+from fastapi import APIRouter, HTTPException, Query, Body, Depends
 from typing import List, Optional, Dict, Any
 from datetime import datetime, timezone, timedelta
 from pydantic import BaseModel, Field, validator
@@ -11,6 +11,8 @@ from firebase_admin import firestore
 
 # Importar configuración de Firebase
 from app.firebase_config import db
+from app.models.roles import Role, CurrentUser
+from app.deps.authz import get_current_user, require_min_role
 
 router = APIRouter(
     prefix="/api/v1/reportes",
@@ -199,7 +201,8 @@ async def get_reportes_seguimiento(
     fecha_desde: Optional[str] = Query(None, description="Fecha desde (YYYY-MM-DD)"),
     fecha_hasta: Optional[str] = Query(None, description="Fecha hasta (YYYY-MM-DD)"),
     page: int = Query(1, ge=1, description="Número de página"),
-    limit: int = Query(50, ge=1, le=100, description="Resultados por página")
+    limit: int = Query(50, ge=1, le=100, description="Resultados por página"),
+    current_user: CurrentUser = Depends(get_current_user),
 ):
     """
     Obtener lista de reportes con seguimiento
@@ -313,7 +316,8 @@ async def get_reportes_seguimiento(
 )
 async def registrar_avance(
     reporteId: str,
-    avance: AvanceInput = Body(...)
+    avance: AvanceInput = Body(...),
+    current_user: CurrentUser = Depends(get_current_user),
 ):
     """
     Registrar un nuevo avance en el reporte
@@ -459,7 +463,8 @@ async def registrar_avance(
 )
 async def asignar_encargado(
     reporteId: str,
-    data: EncargadoInput = Body(...)
+    data: EncargadoInput = Body(...),
+    current_user: CurrentUser = Depends(require_min_role(Role.LIDER)),
 ):
     """
     Asignar encargado a un reporte
@@ -541,7 +546,8 @@ async def asignar_encargado(
 )
 async def cambiar_prioridad(
     reporteId: str,
-    data: PrioridadInput = Body(...)
+    data: PrioridadInput = Body(...),
+    current_user: CurrentUser = Depends(require_min_role(Role.ADMINISTRADOR)),
 ):
     """
     Cambiar prioridad de un reporte
@@ -617,7 +623,10 @@ GET /api/v1/reportes/rep-123abc/historial
 ```
     """
 )
-async def get_historial_reporte(reporteId: str):
+async def get_historial_reporte(
+    reporteId: str,
+    current_user: CurrentUser = Depends(get_current_user),
+):
     """
     Obtener historial de avances de un reporte
     """
@@ -710,7 +719,8 @@ GET /api/v1/reportes/seguimiento/estadisticas?fecha_desde=2026-01-01&fecha_hasta
 )
 async def get_estadisticas(
     fecha_desde: Optional[str] = Query(None, description="Fecha desde (YYYY-MM-DD)"),
-    fecha_hasta: Optional[str] = Query(None, description="Fecha hasta (YYYY-MM-DD)")
+    fecha_hasta: Optional[str] = Query(None, description="Fecha hasta (YYYY-MM-DD)"),
+    current_user: CurrentUser = Depends(get_current_user),
 ):
     """
     Obtener estadísticas del sistema de seguimiento

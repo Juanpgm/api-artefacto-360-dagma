@@ -1,8 +1,10 @@
 """
 Rutas para gestión de Artefacto de Captura DAGMA
 """
-from fastapi import APIRouter, HTTPException, Form, UploadFile, File, Query, Response
+from fastapi import APIRouter, HTTPException, Form, UploadFile, File, Query, Response, Depends, Body
 from typing import List, Optional
+from app.models.roles import Role, CurrentUser
+from app.deps.authz import get_current_user, require_min_role, enforce_group_scope
 import asyncio
 from datetime import datetime, timedelta, timezone
 import pytz
@@ -562,6 +564,7 @@ async def _post_reporte_intervencion(
     tipos_plantas: Optional[str] = None,
     unidades_impactadas: Optional[int] = None,
     unidad_medida: Optional[str] = None,
+    current_user: Optional[CurrentUser] = None,
 ) -> ReconocimientoResponse:
     """
     Handler unificado para POST de reportes de intervención.
@@ -571,6 +574,17 @@ async def _post_reporte_intervencion(
     collection_name = config["collection"]
     s3_prefix = config["s3_prefix"]
     display_name = config["display_name"]
+
+    # Validar scope de grupo: operador/lider solo puede registrar en su propio grupo
+    if current_user is not None:
+        grupo_effectivo = enforce_group_scope(current_user, grupo_key)
+        if grupo_effectivo and grupo_effectivo != grupo_key:
+            raise HTTPException(
+                status_code=403,
+                detail=f"No tienes acceso al grupo '{grupo_key}'. Solo puedes registrar en '{current_user.grupo}'.",
+            )
+        # Forzar registrado_por desde el token (no confiamos en el form)
+        registrado_por = current_user.uid
 
     try:
         # Validar tipo de geometría
@@ -749,6 +763,7 @@ async def _get_reportes_intervenciones(
     id: Optional[str] = None,
     id_actividad: Optional[str] = None,
     grupo: Optional[str] = None,
+    current_user: Optional[CurrentUser] = None,
 ) -> dict:
     """
     Handler unificado para GET de reportes de intervención.
@@ -757,6 +772,16 @@ async def _get_reportes_intervenciones(
     config = get_grupo_config(grupo_key)
     collection_name = config["collection"]
     display_name = config["display_name"]
+
+    # Operador y lider solo pueden ver su propio grupo
+    if current_user is not None and not current_user.at_least(Role.ADMINISTRADOR):
+        if current_user.grupo and current_user.grupo.lower() != grupo_key.lower():
+            raise HTTPException(
+                status_code=403,
+                detail=f"No tienes acceso al grupo '{grupo_key}'. Solo puedes consultar '{current_user.grupo}'.",
+            )
+        # Forzar filtro de grupo a su propio grupo
+        grupo = current_user.grupo
 
     try:
         reportes_ref = db.collection(collection_name)
@@ -916,8 +941,9 @@ async def post_reporte_intervencion_unificado(
     tipo_intervencion: Optional[str] = Form(None, description="Tipo de intervención"),
     descripcion_intervencion: Optional[str] = Form(None, description="Descripción de la intervención"),
     direccion: Optional[str] = Form(None, description="Dirección de la intervención"),
-    registrado_por: Optional[str] = Form(None, description="Persona que registra"),
+    registrado_por: Optional[str] = Form(None, description="Persona que registra (sobreescrito por uid del token)"),
     grupo: Optional[str] = Form(None, description="Grupo operativo"),
+    current_user: CurrentUser = Depends(get_current_user),
     id_actividad: Optional[str] = Form(None, description="ID de la actividad asociada"),
     observaciones: Optional[str] = Form(None, description="Observaciones adicionales"),
     coordinates_type: Optional[str] = Form(None, description="Tipo de geometría (Point, LineString, Polygon, etc.)"),
@@ -944,6 +970,7 @@ async def post_reporte_intervencion_unificado(
         tipos_plantas=tipos_plantas,
         unidades_impactadas=unidades_impactadas,
         unidad_medida=unidad_medida,
+        current_user=current_user,
     )
 
 
@@ -978,9 +1005,10 @@ async def get_reportes_intervenciones_unificado(
     id: Optional[str] = Query(None, min_length=1, description="Filtrar por ID del reporte"),
     id_actividad: Optional[str] = Query(None, min_length=1, description="Filtrar por ID de actividad"),
     grupo: Optional[str] = Query(None, min_length=1, description="Filtrar por nombre del grupo"),
+    current_user: CurrentUser = Depends(get_current_user),
 ):
     return await _get_reportes_intervenciones(
-        grupo_key=grupo_key, id=id, id_actividad=id_actividad, grupo=grupo
+        grupo_key=grupo_key, id=id, id_actividad=id_actividad, grupo=grupo, current_user=current_user
     )
 
 
@@ -1574,11 +1602,26 @@ const response = await fetch('/actividades/abc-123', {
 ```
     """
 )
-async def update_actividad(actividad_id: str, body: dict):
+async def update_actividad(
+    actividad_id: str,
+    body: dict,
+    current_user: CurrentUser = Depends(require_min_role(Role.LIDER)),
+):
     """
-    Actualizar una actividad con los campos especificados.
+    Actualizar una actividad. Requiere nivel lider o superior.
     Si body incluye personal_asignado, dispara notificaciones (email + Calendar).
     """
+    # Solo lider de un grupo específico puede asignar personal en actividades que requieran su grupo
+    # Administrador+ puede modificar cualquier campo de cualquier actividad
+    if not current_user.at_least(Role.ADMINISTRADOR) and "estado_actividad" in body:
+        # Solo administrador puede cambiar estado de actividad (no solo personal_asignado)
+        allowed_fields = {"personal_asignado"}
+        disallowed = set(body.keys()) - allowed_fields
+        if disallowed:
+            raise HTTPException(
+                status_code=403,
+                detail=f"Lider solo puede modificar personal_asignado. Campos no permitidos: {disallowed}",
+            )
     try:
         if not body:
             raise HTTPException(
@@ -1729,11 +1772,23 @@ class PersonalOperativoRequest(BaseModel):
     """,
     tags=["Artefacto de Captura DAGMA"],
 )
-async def crear_personal_operativo(body: PersonalOperativoRequest):
+async def crear_personal_operativo(
+    body: PersonalOperativoRequest,
+    current_user: CurrentUser = Depends(require_min_role(Role.LIDER)),
+):
     """
     Crear un registro de personal operativo en Firebase.
+    Requiere nivel lider o superior. Lider solo puede crear personal de su grupo.
     """
     try:
+        # Lider solo puede crear personal de su propio grupo
+        if not current_user.at_least(Role.ADMINISTRADOR):
+            if current_user.grupo and body.grupo.strip().lower() != current_user.grupo.lower():
+                raise HTTPException(
+                    status_code=403,
+                    detail=f"Solo puedes crear personal del grupo '{current_user.grupo}'.",
+                )
+
         colombia_tz = pytz.timezone("America/Bogota")
         nuevo_id = str(uuid.uuid4())
         ahora = datetime.now(colombia_tz).isoformat()
@@ -1784,11 +1839,16 @@ fetch('/personal_operativo?grupo=Cuadrilla');
 async def get_personal_operativo(
     response: Response,
     grupo: Optional[str] = Query(None, min_length=1, description="Filtrar por nombre de grupo"),
+    current_user: CurrentUser = Depends(require_min_role(Role.LIDER)),
 ):
     """
-    Obtener personal operativo con filtro opcional por grupo.
+    Obtener personal operativo. Lider solo ve su grupo.
     """
     try:
+        # Lider solo ve su propio grupo (filtro forzado)
+        if not current_user.at_least(Role.ADMINISTRADOR) and current_user.grupo:
+            grupo = current_user.grupo
+
         ref = db.collection("personal_operativo")
         query = ref
 
