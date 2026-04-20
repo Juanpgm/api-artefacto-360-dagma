@@ -1771,12 +1771,12 @@ class PersonalAsignadoItem(BaseModel):
 
 
 @router.patch(
-    "/actividades/{actividad_id}/personal_asignado_actividad",
+    "/actividades/{actividad_id}/personal_asignado",
     summary="🟠 PATCH | Agregar Personal Asignado a Actividad",
     description="""
 ## 🟠 PATCH | Agregar Personal Asignado a Actividad
 
-**Propósito**: Agrega un integrante al array `personal_asignado_actividad` dentro del documento de la actividad
+**Propósito**: Agrega un integrante al array `personal_asignado` dentro del documento de la actividad
 en la colección `plan_distrito_verde`. Si el campo no existe, lo crea automáticamente.
 
 ### 📥 Path
@@ -1836,12 +1836,12 @@ async def patch_personal_asignado(actividad_id: str, body: PersonalAsignadoItem)
 
         # ArrayUnion crea el campo si no existe, y agrega sin duplicar objetos idénticos
         doc_ref.update({
-            "personal_asignado_actividad": firestore.ArrayUnion([nuevo_personal])
+            "personal_asignado": firestore.ArrayUnion([nuevo_personal])
         })
 
         # Leer el doc actualizado para devolver el total
         updated = doc_ref.get().to_dict() or {}
-        total = len(updated.get("personal_asignado_actividad", []))
+        total = len(updated.get("personal_asignado", []))
 
         return {
             "success": True,
