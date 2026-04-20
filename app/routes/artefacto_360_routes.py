@@ -1235,7 +1235,7 @@ async def get_actividades(
 
             return personal_encontrado
 
-        plan_ref = db.collection('actividades')
+        plan_ref = db.collection('plan_distrito_verde')
 
         # Búsqueda por ID único — sin paginación
         if id:
@@ -1447,7 +1447,7 @@ async def convocar_actividad(
             actividad_data['calendar_event_error'] = str(e)
 
         # Guardar en Firebase
-        db.collection("actividades").document(actividad_id).set(actividad_data)
+        db.collection("plan_distrito_verde").document(actividad_id).set(actividad_data)
 
         # Email de confirmación al coordinador (no bloqueante)
         try:
@@ -1491,7 +1491,7 @@ async def asignar_personal_actividad(
         if not body:
             raise HTTPException(status_code=400, detail="Debe enviar al menos un registro de personal")
 
-        plan_ref = db.collection("actividades")
+        plan_ref = db.collection("plan_distrito_verde")
         cache_actividades: dict[str, str] = {}
         cache_actividad_data: dict[str, dict] = {}
 
@@ -1548,7 +1548,7 @@ async def asignar_personal_actividad(
             # Obtener datos de la actividad con cache (para email + calendar)
             if actividad_document_id not in cache_actividad_data:
                 try:
-                    doc = db.collection("actividades").document(actividad_document_id).get()
+                    doc = db.collection("plan_distrito_verde").document(actividad_document_id).get()
                     cache_actividad_data[actividad_document_id] = doc.to_dict() or {} if doc.exists else {}
                 except Exception:
                     cache_actividad_data[actividad_document_id] = {}
@@ -1616,7 +1616,7 @@ async def delete_actividad(actividad_id: str):
     Eliminar actividad por ID
     """
     try:
-        collection_ref = db.collection("actividades")
+        collection_ref = db.collection("plan_distrito_verde")
 
         # Intentar primero por ID de documento
         doc_ref = collection_ref.document(actividad_id)
@@ -1709,7 +1709,7 @@ async def update_actividad(actividad_id: str, body: dict):
                 detail="El cuerpo de la solicitud no puede estar vacío"
             )
 
-        collection_ref = db.collection("actividades")
+        collection_ref = db.collection("plan_distrito_verde")
 
         # Intentar primero por ID de documento
         doc_ref = collection_ref.document(actividad_id)
@@ -1771,13 +1771,13 @@ class PersonalAsignadoItem(BaseModel):
 
 
 @router.patch(
-    "/actividades/{actividad_id}/personal_asignado",
+    "/actividades/{actividad_id}/personal_asignado_actividad",
     summary="🟠 PATCH | Agregar Personal Asignado a Actividad",
     description="""
 ## 🟠 PATCH | Agregar Personal Asignado a Actividad
 
-**Propósito**: Agrega un integrante al array `personal_asignado` dentro del documento de la actividad.
-Si el campo no existe, lo crea automáticamente.
+**Propósito**: Agrega un integrante al array `personal_asignado_actividad` dentro del documento de la actividad
+en la colección `plan_distrito_verde`. Si el campo no existe, lo crea automáticamente.
 
 ### 📥 Path
 - **actividad_id**: ID de la actividad
@@ -1812,7 +1812,7 @@ async def patch_personal_asignado(actividad_id: str, body: PersonalAsignadoItem)
     Crea el array si no existe.
     """
     try:
-        collection_ref = db.collection("actividades")
+        collection_ref = db.collection("plan_distrito_verde")
 
         # Resolver el documento
         doc_ref = collection_ref.document(actividad_id)
@@ -1836,12 +1836,12 @@ async def patch_personal_asignado(actividad_id: str, body: PersonalAsignadoItem)
 
         # ArrayUnion crea el campo si no existe, y agrega sin duplicar objetos idénticos
         doc_ref.update({
-            "personal_asignado": firestore.ArrayUnion([nuevo_personal])
+            "personal_asignado_actividad": firestore.ArrayUnion([nuevo_personal])
         })
 
         # Leer el doc actualizado para devolver el total
         updated = doc_ref.get().to_dict() or {}
-        total = len(updated.get("personal_asignado", []))
+        total = len(updated.get("personal_asignado_actividad", []))
 
         return {
             "success": True,
