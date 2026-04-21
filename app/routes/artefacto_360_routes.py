@@ -17,7 +17,9 @@ import math
 import os
 import io
 import logging
+
 from pydantic import BaseModel, Field
+from app.models.validation import CoordinatesModel, ArbolesDataModel
 
 # Importar configuración de Firebase y S3/Storage
 from app.firebase_config import db
@@ -35,7 +37,9 @@ from app.services.calendar_service import create_activity_event, sync_event_pers
 logger = logging.getLogger(__name__)
 
 # Importar librerías para intersecciones geográficas
+
 from shapely.geometry import Point, shape
+from app.utils.spatial_index import SpatialIndex
 
 router = APIRouter(tags=["Artefacto de Captura DAGMA"])
 
@@ -63,164 +67,59 @@ def _load_geojson_features(filepath: str) -> dict:
         return {}
 
 # Cargar los datos al iniciar
+
 _COMUNAS_FEATURES = _load_geojson_features(_COMUNAS_FILE)
 _BARRIOS_FEATURES = _load_geojson_features(_BARRIOS_FILE)
+
+# Crear índices espaciales para búsquedas eficientes
+_COMUNAS_INDEX = SpatialIndex(_COMUNAS_FEATURES, 'comuna_corregimiento')
+_BARRIOS_INDEX = SpatialIndex(_BARRIOS_FEATURES, 'barrio_vereda')
 
 print(f"✅ Cargadas {len(_COMUNAS_FEATURES)} comunas/corregimientos")
 print(f"✅ Cargados {len(_BARRIOS_FEATURES)} barrios/veredas")
 
 
+
 def get_location_from_coordinates(coordinates: List) -> tuple:
     """
     Realiza intersecciones geográficas para encontrar la comuna/corregimiento y barrio/vereda
-    
+    usando índices espaciales STRtree para mayor eficiencia.
     Args:
         coordinates: Array de coordenadas [lon, lat] para Point
-        
     Returns:
         Tupla con (comuna_corregimiento, barrio_vereda) o (None, None) si no encuentra
     """
     if not coordinates or len(coordinates) != 2:
         return None, None
-    
     try:
-        # Crear punto a partir de las coordenadas
-        point = Point(coordinates[0], coordinates[1])
-        
-        # Buscar intersección con comunas
-        comuna_corregimiento = None
-        for idx, feature in _COMUNAS_FEATURES.items():
-            try:
-                # Convertir la geometría del GeoJSON a un objeto Shapely
-                geom = shape(feature['geometry'])
-                if point.within(geom):
-                    # El punto está dentro de este polígono
-                    comuna_corregimiento = feature['properties'].get('comuna_corregimiento')
-                    break
-            except Exception as e:
-                print(f"⚠️ Error procesando comuna {idx}: {str(e)}")
-                continue
-        
-        # Buscar intersección con barrios
-        barrio_vereda = None
-        for idx, feature in _BARRIOS_FEATURES.items():
-            try:
-                geom = shape(feature['geometry'])
-                if point.within(geom):
-                    # El punto está dentro de este polígono
-                    barrio_vereda = feature['properties'].get('barrio_vereda')
-                    break
-            except Exception as e:
-                print(f"⚠️ Error procesando barrio {idx}: {str(e)}")
-                continue
-        
+        comuna_corregimiento = _COMUNAS_INDEX.query(coordinates)
+        barrio_vereda = _BARRIOS_INDEX.query(coordinates)
         return comuna_corregimiento, barrio_vereda
-    
     except Exception as e:
-        print(f"❌ Error en intersección geográfica: {str(e)}")
+        print(f"❌ Error en intersección geográfica (índice): {str(e)}")
         return None, None
 
 
 # ==================== FUNCIONES AUXILIARES ====================#
-def clean_nan_values(obj):
-    """
-    Limpia valores NaN, infinitos y otros valores no compatibles con JSON
-    """
-    if isinstance(obj, dict):
-        return {key: clean_nan_values(value) for key, value in obj.items()}
-    elif isinstance(obj, list):
-        return [clean_nan_values(item) for item in obj]
-    elif isinstance(obj, float):
-        if math.isnan(obj) or math.isinf(obj):
-            return None
-        return obj
-    else:
-        return obj
+from app.utils.clean_json import clean_json
+
 
 
 def validate_coordinates(coordinates: list, geometry_type: str) -> bool:
     """
-    Valida coordenadas según el tipo de geometría
+    Valida coordenadas usando modelo Pydantic
     """
-    if not isinstance(coordinates, list):
-        raise ValueError("Las coordenadas deben ser un array")
-    
-    if geometry_type == "Point":
-        if len(coordinates) != 2:
-            raise ValueError("Point debe tener exactamente 2 coordenadas [lon, lat]")
-        lon, lat = coordinates
-        if not isinstance(lon, (int, float)) or not isinstance(lat, (int, float)):
-            raise ValueError("Las coordenadas deben ser números")
-        if not (-180 <= lon <= 180):
-            raise ValueError(f"Longitud inválida: {lon}. Debe estar entre -180 y 180")
-        if not (-90 <= lat <= 90):
-            raise ValueError(f"Latitud inválida: {lat}. Debe estar entre -90 y 90")
-    
-    elif geometry_type in ["LineString", "MultiPoint"]:
-        if len(coordinates) < 2:
-            raise ValueError(f"{geometry_type} debe tener al menos 2 puntos")
-        for point in coordinates:
-            if not isinstance(point, list) or len(point) != 2:
-                raise ValueError("Cada punto debe ser [lon, lat]")
-            lon, lat = point
-            if not (-180 <= lon <= 180) or not (-90 <= lat <= 90):
-                raise ValueError(f"Coordenadas fuera de rango: [{lon}, {lat}]")
-    
-    elif geometry_type == "Polygon":
-        if len(coordinates) < 1:
-            raise ValueError("Polygon debe tener al menos un anillo")
-        for ring in coordinates:
-            if not isinstance(ring, list) or len(ring) < 4:
-                raise ValueError("Cada anillo del polígono debe tener al menos 4 puntos")
-    
+    CoordinatesModel(coordinates=coordinates, geometry_type=geometry_type)
     return True
+
 
 
 def validate_arboles_data(arboles_data: str) -> list:
     """
-    Valida y parsea el campo arboles_data (JSON string) con la lista de árboles.
-    Cada árbol debe tener 'especie' (str) y 'cantidad' (int > 0).
-    Retorna la lista de árboles parseada.
+    Valida y parsea el campo arboles_data usando modelo Pydantic
     """
-    try:
-        arboles = json.loads(arboles_data)
-    except (json.JSONDecodeError, ValueError):
-        raise ValueError(
-            "El campo arboles_data debe ser un JSON válido. "
-            "Ejemplo: '[{\"especie\": \"Ceiba\", \"cantidad\": 5}]'"
-        )
-
-    if not isinstance(arboles, list):
-        raise ValueError("arboles_data debe ser un array JSON. Ejemplo: '[{\"especie\": \"Ceiba\", \"cantidad\": 5}]'")
-
-    if len(arboles) == 0:
-        raise ValueError("arboles_data debe contener al menos un árbol")
-
-    validated = []
-    for i, arbol in enumerate(arboles):
-        if not isinstance(arbol, dict):
-            raise ValueError(f"El árbol en la posición {i} debe ser un objeto con 'especie' y 'cantidad'")
-
-        especie = arbol.get("especie")
-        cantidad = arbol.get("cantidad")
-
-        if not especie or not isinstance(especie, str) or not especie.strip():
-            raise ValueError(f"El árbol en la posición {i} debe tener un campo 'especie' (texto no vacío)")
-
-        if cantidad is None:
-            raise ValueError(f"El árbol en la posición {i} debe tener un campo 'cantidad'")
-
-        try:
-            cantidad_int = int(cantidad)
-        except (TypeError, ValueError):
-            raise ValueError(f"El campo 'cantidad' del árbol en la posición {i} debe ser un número entero")
-
-        if cantidad_int <= 0:
-            raise ValueError(f"El campo 'cantidad' del árbol en la posición {i} debe ser mayor que 0")
-
-        validated.append({"especie": especie.strip(), "cantidad": cantidad_int})
-
-    return validated
+    model = ArbolesDataModel(arboles=arboles_data)
+    return [a.dict() for a in model.arboles]
 
 
 def validate_photo_file(file: UploadFile) -> bool:
@@ -266,14 +165,15 @@ async def upload_photos_to_s3(photos: List[UploadFile], grupo: str, reporte_id: 
     """
     Sube fotos a S3 y retorna lista de dicts con metadata rica de cada archivo.
     Estructura S3 key: reportes/{grupo}/{reporte_id}/{timestamp}_{i}_{filename}
+    Ahora usa cargas concurrentes con asyncio.gather.
     """
     documentos = []
-    for i, photo in enumerate(photos):
+
+    async def upload_single_photo(i, photo):
         ts_photo = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
         safe_filename = "".join(c for c in photo.filename if c.isalnum() or c in "._-")
         photo_filename = f"{ts_photo}_{i}_{safe_filename}"
         s3_key = f"reportes/{grupo}/{reporte_id}/{photo_filename}"
-
         if s3_client:
             try:
                 photo_content = await photo.read()
@@ -291,8 +191,8 @@ async def upload_photos_to_s3(photos: List[UploadFile], grupo: str, reporte_id: 
                     "size": len(photo_content),
                     "upload_date": datetime.now(timezone.utc).isoformat()
                 }
-                documentos.append(doc_meta)
                 await photo.seek(0)
+                return doc_meta
             except ClientError as e:
                 print(f"❌ Error subiendo foto a S3: {str(e)}")
                 raise HTTPException(
@@ -308,9 +208,14 @@ async def upload_photos_to_s3(photos: List[UploadFile], grupo: str, reporte_id: 
                 "size": 0,
                 "upload_date": datetime.now(timezone.utc).isoformat()
             }
-            documentos.append(doc_meta)
             print(f"⚠️ Modo desarrollo: URL ficticia generada para {photo.filename}")
-    return documentos
+            return doc_meta
+
+    # Ejecutar todas las cargas concurrentemente
+    tasks = [upload_single_photo(i, photo) for i, photo in enumerate(photos)]
+    documentos = await asyncio.gather(*tasks)
+
+    # Fin función
 
 
 def generar_documentos_con_enlaces(documentos: list, s3_client, bucket_name: str) -> list:
@@ -404,19 +309,16 @@ def enriquecer_reportes_con_enlaces(reportes: list, s3_client, bucket_name: str)
     Maneja tanto formato nuevo (documentos) como legacy (photosUrl).
     """
     for reporte in reportes:
-        if "documentos" in reporte and reporte["documentos"]:
+        # Si no existe 'documentos' pero sí 'photosUrl', convertir y asignar
+        if not reporte.get("documentos") and reporte.get("photosUrl"):
+            reporte["documentos"] = convertir_photosUrl_a_documentos(
+                reporte["photosUrl"], s3_client, bucket_name
+            )
+        if reporte.get("documentos"):
             reporte["documentos_con_enlaces"] = generar_documentos_con_enlaces(
                 reporte["documentos"], s3_client, bucket_name
             )
             reporte["total_documentos"] = len(reporte["documentos"])
-        elif "photosUrl" in reporte and reporte["photosUrl"]:
-            documentos_legacy = convertir_photosUrl_a_documentos(
-                reporte["photosUrl"], s3_client, bucket_name
-            )
-            reporte["documentos_con_enlaces"] = generar_documentos_con_enlaces(
-                documentos_legacy, s3_client, bucket_name
-            )
-            reporte["total_documentos"] = len(documentos_legacy)
         else:
             reporte["documentos_con_enlaces"] = []
             reporte["total_documentos"] = 0
@@ -941,7 +843,7 @@ async def post_reporte_intervencion_unificado(
     tipo_intervencion: Optional[str] = Form(None, description="Tipo de intervención"),
     descripcion_intervencion: Optional[str] = Form(None, description="Descripción de la intervención"),
     direccion: Optional[str] = Form(None, description="Dirección de la intervención"),
-    registrado_por: Optional[str] = Form(None, description="Persona que registra (sobreescrito por uid del token)"),
+    # registrado_por ya no se expone como parámetro externo, solo se fuerza desde el token
     grupo: Optional[str] = Form(None, description="Grupo operativo"),
     current_user: CurrentUser = Depends(get_current_user),
     id_actividad: Optional[str] = Form(None, description="ID de la actividad asociada"),
@@ -959,7 +861,7 @@ async def post_reporte_intervencion_unificado(
         tipo_intervencion=tipo_intervencion,
         descripcion_intervencion=descripcion_intervencion,
         direccion=direccion,
-        registrado_por=registrado_por,
+        # registrado_por se asigna internamente desde el token
         grupo=grupo,
         id_actividad=id_actividad,
         observaciones=observaciones,
@@ -1018,14 +920,14 @@ async def get_reportes_intervenciones_unificado(
 @router.post("/grupo-cuadrilla/reporte_intervencion", summary="🟢 POST | Reporte Intervención Cuadrilla", response_model=ReconocimientoResponse, include_in_schema=False)
 async def post_reporte_cuadrilla_legacy(
     tipo_intervencion: Optional[str] = Form(None), descripcion_intervencion: Optional[str] = Form(None),
-    arboles_data: Optional[str] = Form(None), registrado_por: Optional[str] = Form(None),
+    arboles_data: Optional[str] = Form(None),
     grupo: Optional[str] = Form(None), id_actividad: Optional[str] = Form(None),
     observaciones: Optional[str] = Form(None), coordinates_type: Optional[str] = Form(None),
     coordinates_data: Optional[str] = Form(None), photos: Optional[List[UploadFile]] = File(None),
 ):
     return await _post_reporte_intervencion(
         grupo_key="cuadrilla", tipo_intervencion=tipo_intervencion, descripcion_intervencion=descripcion_intervencion,
-        direccion=None, registrado_por=registrado_por, grupo=grupo, id_actividad=id_actividad,
+        direccion=None, grupo=grupo, id_actividad=id_actividad,
         observaciones=observaciones, coordinates_type=coordinates_type, coordinates_data=coordinates_data,
         photos=photos, arboles_data=arboles_data,
     )
@@ -1034,14 +936,14 @@ async def post_reporte_cuadrilla_legacy(
 async def post_reporte_vivero_legacy(
     tipo_intervencion: Optional[str] = Form(None), tipos_plantas: Optional[str] = Form(None),
     descripcion_intervencion: Optional[str] = Form(None), direccion: Optional[str] = Form(None),
-    registrado_por: Optional[str] = Form(None), grupo: Optional[str] = Form(None),
+    grupo: Optional[str] = Form(None),
     id_actividad: Optional[str] = Form(None), observaciones: Optional[str] = Form(None),
     coordinates_type: Optional[str] = Form(None), coordinates_data: Optional[str] = Form(None),
     photos: Optional[List[UploadFile]] = File(None),
 ):
     return await _post_reporte_intervencion(
         grupo_key="vivero", tipo_intervencion=tipo_intervencion, descripcion_intervencion=descripcion_intervencion,
-        direccion=direccion, registrado_por=registrado_por, grupo=grupo, id_actividad=id_actividad,
+        direccion=direccion, grupo=grupo, id_actividad=id_actividad,
         observaciones=observaciones, coordinates_type=coordinates_type, coordinates_data=coordinates_data,
         photos=photos, tipos_plantas=tipos_plantas,
     )
@@ -1066,14 +968,14 @@ async def post_reporte_gobernanza_legacy(
 async def post_reporte_ecosistemas_legacy(
     tipo_intervencion: Optional[str] = Form(None), unidad_medida: Optional[str] = Form(None),
     unidades_impactadas: Optional[int] = Form(None), descripcion_intervencion: Optional[str] = Form(None),
-    direccion: Optional[str] = Form(None), registrado_por: Optional[str] = Form(None),
+    direccion: Optional[str] = Form(None),
     grupo: Optional[str] = Form(None), id_actividad: Optional[str] = Form(None),
     observaciones: Optional[str] = Form(None), coordinates_type: Optional[str] = Form(None),
     coordinates_data: Optional[str] = Form(None), photos: Optional[List[UploadFile]] = File(None),
 ):
     return await _post_reporte_intervencion(
         grupo_key="ecosistemas", tipo_intervencion=tipo_intervencion, descripcion_intervencion=descripcion_intervencion,
-        direccion=direccion, registrado_por=registrado_por, grupo=grupo, id_actividad=id_actividad,
+        direccion=direccion, grupo=grupo, id_actividad=id_actividad,
         observaciones=observaciones, coordinates_type=coordinates_type, coordinates_data=coordinates_data,
         photos=photos, unidad_medida=unidad_medida, unidades_impactadas=unidades_impactadas,
     )
