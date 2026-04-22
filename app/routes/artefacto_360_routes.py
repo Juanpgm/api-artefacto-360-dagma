@@ -335,6 +335,7 @@ class ReconocimientoResponse(BaseModel):
     coordinates: Optional[dict] = None
     photosUrl: Optional[List[str]] = None
     photos_uploaded: Optional[int] = None
+    documentos_con_enlaces: Optional[List[dict]] = None
     timestamp: str
 
 
@@ -640,6 +641,7 @@ async def _post_reporte_intervencion(
             )
 
         photos_urls = [d["s3_url"] for d in documentos]
+        docs_enriquecidos = generar_documentos_con_enlaces(documentos, s3_client, bucket_name) if s3_client and documentos else []
         return ReconocimientoResponse(
             success=True,
             id=reporte_id,
@@ -648,6 +650,7 @@ async def _post_reporte_intervencion(
             coordinates=geometry,
             photosUrl=photos_urls,
             photos_uploaded=len(documentos),
+            documentos_con_enlaces=docs_enriquecidos,
             timestamp=timestamp
         )
 
