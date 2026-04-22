@@ -1887,6 +1887,12 @@ async def verificar_registro_personal(
 
 _GRUPOS_KEYS = ["cuadrilla", "vivero", "gobernanza", "ecosistemas", "umata"]
 
+_SLIM_FIELDS = frozenset({
+    "id", "timestamp", "grupo", "tipo_intervencion", "barrio_vereda",
+    "descripcion_intervencion", "photosUrl", "registrado_por", "direccion",
+    "photos_uploaded", "documentos_con_enlaces",
+})
+
 
 async def _fetch_grupo_reportes(grupo_key: str, id_actividad: Optional[str], grupo_filter: Optional[str]) -> tuple[str, list[dict]]:
     """Fetches reports for a single group collection, returns (grupo_key, list_of_docs)."""
@@ -1948,9 +1954,14 @@ async def get_reportes_intervenciones_todos(
     response: Response,
     grupo: Optional[str] = Query(None, description="Filtrar por grupo operativo (cuadrilla, vivero, gobernanza, ecosistemas, umata)"),
     id_actividad: Optional[str] = Query(None, description="Filtrar por ID de actividad"),
+    page: int = Query(1, ge=1, description="Página a retornar (empieza en 1)"),
+    per_page: int = Query(30, ge=1, le=100, description="Registros por página (máx. 100)"),
+    slim: bool = Query(False, description="Retornar solo campos esenciales para listado (omite coordinates y detalle)"),
 ):
     """
     Retorna reportes de todos los grupos en paralelo con asyncio.gather.
+    Soporta paginación (?page=1&per_page=30) y proyección de campos (?slim=true).
+    Las presigned URLs de S3 se generan solo para los registros de la página actual.
     """
     if grupo and grupo.strip().lower() not in _GRUPOS_KEYS:
         raise HTTPException(
@@ -1967,7 +1978,22 @@ async def get_reportes_intervenciones_todos(
 
     results = await asyncio.gather(*tasks)
 
-    # Enriquecer reportes con presigned URLs de S3
+    # Conteos totales por grupo (sobre el dataset completo, sin paginar)
+    totals: dict[str, int] = {}
+    all_reportes: list[dict] = []
+    for grupo_key, reportes in results:
+        totals[grupo_key] = len(reportes)
+        all_reportes.extend(reportes)
+
+    # Ordenar por timestamp descendente (ISO 8601 es lexicográficamente comparable)
+    all_reportes.sort(key=lambda r: r.get("timestamp", ""), reverse=True)
+
+    total_general = len(all_reportes)
+    total_pages = max(1, (total_general + per_page - 1) // per_page)
+    offset = (page - 1) * per_page
+    page_items = all_reportes[offset: offset + per_page]
+
+    # Enriquecer con presigned URLs solo los registros de la página actual
     bucket_name = os.getenv('S3_BUCKET_NAME', '360-dagma-photos')
     s3_client = None
     try:
@@ -1975,26 +2001,31 @@ async def get_reportes_intervenciones_todos(
     except Exception:
         print("⚠️ No se pudo inicializar S3 client para presigned URLs en reportes unificados")
 
-    data: dict[str, list] = {}
-    totals: dict[str, int] = {}
-    total_general = 0
+    if s3_client and page_items:
+        enriquecer_reportes_con_enlaces(page_items, s3_client, bucket_name)
 
-    for grupo_key, reportes in results:
-        if s3_client and reportes:
-            enriquecer_reportes_con_enlaces(reportes, s3_client, bucket_name)
-        data[grupo_key] = reportes
-        totals[grupo_key] = len(reportes)
-        total_general += len(reportes)
+    # Proyección slim: omitir coordinates y campos de detalle
+    if slim:
+        page_items = [{k: v for k, v in r.items() if k in _SLIM_FIELDS} for r in page_items]
 
     response.headers["Cache-Control"] = "public, max-age=60"
     return {
         "status": "success",
-        "data": data,
+        "data": page_items,
+        "pagination": {
+            "page": page,
+            "per_page": per_page,
+            "total": total_general,
+            "total_pages": total_pages,
+            "has_next": page < total_pages,
+            "has_prev": page > 1,
+        },
         "totals": totals,
         "total_general": total_general,
         "filters": {
             "grupo": grupo.strip().lower() if grupo else None,
             "id_actividad": id_actividad.strip() if id_actividad else None,
+            "slim": slim,
         },
         "timestamp": datetime.now(pytz.timezone("America/Bogota")).isoformat(),
     }
