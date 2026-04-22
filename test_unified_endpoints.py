@@ -65,16 +65,22 @@ class TestGruposConfig:
     def test_grupo_config_has_required_fields(self):
         from app.routes.artefacto_360_routes import GRUPOS_CONFIG
         for grupo, config in GRUPOS_CONFIG.items():
-            assert "collection" in config, f"Missing 'collection' for {grupo}"
             assert "display_name" in config, f"Missing 'display_name' for {grupo}"
             assert "s3_prefix" in config, f"Missing 's3_prefix' for {grupo}"
-            assert config["collection"].startswith("reportes_intervenciones_grupo_")
+            # La colección es ahora global (COLLECTION_REPORTES_INTERVENCIONES),
+            # no está por grupo en GRUPOS_CONFIG
+            assert "collection" not in config, f"'collection' ya no debe estar en GRUPOS_CONFIG ({grupo})"
 
     def test_get_grupo_config_valid(self):
-        from app.routes.artefacto_360_routes import get_grupo_config
+        from app.routes.artefacto_360_routes import get_grupo_config, COLLECTION_REPORTES_INTERVENCIONES
         config = get_grupo_config("cuadrilla")
-        assert config["collection"] == "reportes_intervenciones_grupo_cuadrilla"
         assert config["display_name"] == "Cuadrilla"
+        assert config["s3_prefix"] == "cuadrilla"
+        # Verificar que la constante global de colección existe y es la correcta
+        assert COLLECTION_REPORTES_INTERVENCIONES == "reportes_intervenciones"
+        assert config["s3_prefix"] == "cuadrilla"
+        # Verificar que la constante global de colección existe y es la correcta
+        assert COLLECTION_REPORTES_INTERVENCIONES == "reportes_intervenciones"
 
     def test_get_grupo_config_invalid(self):
         from app.routes.artefacto_360_routes import get_grupo_config
@@ -287,27 +293,15 @@ class TestUnifiedPostEndpoint:
         )
         assert response.status_code == 200
         data = response.json()
-        assert data["photos_uploaded"] == 2
-
-    def test_post_firebase_save_collection(self, mock_firebase_db, mock_s3):
-        """Verificar que se guarda en la colección correcta de Firebase"""
-        for grupo, expected_collection in [
-            ("cuadrilla", "reportes_intervenciones_grupo_cuadrilla"),
-            ("vivero", "reportes_intervenciones_grupo_vivero"),
-            ("gobernanza", "reportes_intervenciones_grupo_gobernanza"),
-            ("ecosistemas", "reportes_intervenciones_grupo_ecosistemas"),
-            ("umata", "reportes_intervenciones_grupo_umata"),
-        ]:
+        assert data["phottodos los grupos escriben en la colección unificada 'reportes_intervenciones'"""
+        for grupo in ["cuadrilla", "vivero", "gobernanza", "ecosistemas", "umata"]:
             mock_firebase_db.reset_mock()
             response = client.post(
                 f"/grupos/{grupo}/reporte_intervencion",
                 data={"tipo_intervencion": "Test"},
             )
             assert response.status_code == 200
-            mock_firebase_db.collection.assert_called_with(expected_collection)
-
-
-# ==================== TEST: Unified GET Endpoint ====================#
+            mock_firebase_db.collection.assert_called_with("reportes_intervenciones"
 
 class TestUnifiedGetEndpoint:
     """Tests para GET /grupos/{grupo}/reportes_intervenciones"""
@@ -337,16 +331,20 @@ class TestUnifiedGetEndpoint:
         assert data["filters"]["id_actividad"] == "ACT-123"
 
     def test_get_reportes_con_filtro_grupo(self, mock_firebase_db, mock_s3):
-        """GET con filtro grupo"""
+        """GET con grupo_key en URL filtra correctamente (el ?grupo= query param es ignorado)"""
+        response = client.get(
+            "/grupos/vivero/reportes_intervenciones?grupo=Vivero A"
+        )grupo_key en URL filtra correctamente (el ?grupo= query param es ignorado)"""
         response = client.get(
             "/grupos/vivero/reportes_intervenciones?grupo=Vivero A"
         )
         assert response.status_code == 200
         data = response.json()
-        assert data["filters"]["grupo"] == "Vivero A"
-
-    def test_get_con_id_documento(self, mock_firebase_db, mock_s3):
-        """GET con id específico busca por documento"""
+        # El filtro que aplica es grupo_key (del URL), no el query param
+        assert data["filters"]["grupo"] == "viveroe_db, mock_s3):
+        """GET con id específico busca por documento y verifica que pertenece al grupo"""
+        mock_doc = Mock()
+        mock_doc.exists = True y verifica que pertenece al grupo"""
         mock_doc = Mock()
         mock_doc.exists = True
         mock_doc.id = "test-doc-id"
@@ -354,7 +352,7 @@ class TestUnifiedGetEndpoint:
             "id": "test-doc-id",
             "tipo_intervencion": "Poda",
             "timestamp": "2026-01-01T00:00:00",
-        }
+            "grupo": "cuadrilla",  # campo requerido para verificar pertenencia al grupo
         mock_firebase_db.collection.return_value.document.return_value.get.return_value = mock_doc
 
         response = client.get(
@@ -366,25 +364,13 @@ class TestUnifiedGetEndpoint:
         assert data["data"][0]["id"] == "test-doc-id"
 
     def test_get_firebase_collection(self, mock_firebase_db, mock_s3):
-        """Verificar que consulta la colección correcta"""
-        for grupo, expected_collection in [
-            ("cuadrilla", "reportes_intervenciones_grupo_cuadrilla"),
-            ("vivero", "reportes_intervenciones_grupo_vivero"),
-            ("gobernanza", "reportes_intervenciones_grupo_gobernanza"),
-            ("ecosistemas", "reportes_intervenciones_grupo_ecosistemas"),
-            ("umata", "reportes_intervenciones_grupo_umata"),
-        ]:
+        """Verificar que todos los grupos consultan la colección unificada 'reportes_intervenciones'"""
+        for grupo in ["cutodos los grupos consultan la colección unificada 'reportes_intervenciones'"""
+        for grupo in ["cuadrilla", "vivero", "gobernanza", "ecosistemas", "umata"]:
             mock_firebase_db.reset_mock()
             response = client.get(f"/grupos/{grupo}/reportes_intervenciones")
             assert response.status_code == 200
-            mock_firebase_db.collection.assert_called_with(expected_collection)
-
-
-# ==================== TEST: Legacy Routes ====================#
-
-class TestLegacyRoutes:
-    """Verificar que las rutas legacy siguen funcionando idénticas"""
-
+            mock_firebase_db.collection.assert_called_with("reportes_intervenciones"
     @pytest.mark.parametrize("grupo", GRUPOS_VALIDOS)
     def test_legacy_post_routes(self, grupo, mock_firebase_db, mock_s3):
         """POST /grupo-{name}/reporte_intervencion sigue funcionando"""
@@ -446,7 +432,14 @@ class TestLegacyRoutes:
         assert saved_data["unidades_impactadas"] == 25
 
     def test_legacy_and_unified_same_collection(self, mock_firebase_db, mock_s3):
-        """Legacy y unificado escriben en la misma colección"""
+        """Legacy y unificado escriben en la misma colección unificada 'reportes_intervenciones'"""
+        # POST via unified
+        mock_firebase_db.reset_mock()
+        client.post("/grupos/gobernanza/reporte_intervencion", data={"tipo_intervencion": "A"})
+        unified_collection = mock_firebase_db.collection.call_args[0][0]
+
+        # POST via legacy
+        mock_firebase_db.reset_mock() unificada 'reportes_intervenciones'"""
         # POST via unified
         mock_firebase_db.reset_mock()
         client.post("/grupos/gobernanza/reporte_intervencion", data={"tipo_intervencion": "A"})
@@ -457,14 +450,7 @@ class TestLegacyRoutes:
         client.post("/grupo-gobernanza/reporte_intervencion", data={"tipo_intervencion": "B"})
         legacy_collection = mock_firebase_db.collection.call_args[0][0]
 
-        assert unified_collection == legacy_collection == "reportes_intervenciones_grupo_gobernanza"
-
-
-# ==================== TEST: Response Structure ====================#
-
-class TestResponseStructure:
-    """Verificar que la estructura de respuesta es correcta"""
-
+        assert unified_collection == legacy_collection == "reportes_intervenciones
     def test_post_response_fields(self, mock_firebase_db, mock_s3):
         """POST response tiene todos los campos esperados"""
         response = client.post(
@@ -492,10 +478,18 @@ class TestResponseStructure:
         assert isinstance(data["data"], list)
 
     def test_get_filters_returned(self, mock_firebase_db, mock_s3):
-        """GET retorna los filtros aplicados"""
+        """GET retorna los filtros aplicados; grupo siempre refleja el grupo_key del URL"""
         response = client.get(
             "/grupos/umata/reportes_intervenciones?id_actividad=ACT-1&grupo=G1"
         )
         data = response.json()
         assert data["filters"]["id_actividad"] == "ACT-1"
-        assert data["filters"]["grupo"] == "G1"
+        # El filtro de grupo es siempre grupo_key (del URL), no el query param
+        assert data["filters"]["grupo"] == "; grupo siempre refleja el grupo_key del URL"""
+        response = client.get(
+            "/grupos/umata/reportes_intervenciones?id_actividad=ACT-1&grupo=G1"
+        )
+        data = response.json()
+        assert data["filters"]["id_actividad"] == "ACT-1"
+        # El filtro de grupo es siempre grupo_key (del URL), no el query param
+        assert data["filters"]["grupo"] == "umata

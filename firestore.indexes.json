@@ -32,6 +32,30 @@
         { "fieldPath": "actividad_id", "order": "ASCENDING" },
         { "fieldPath": "grupo", "order": "ASCENDING" }
       ]
+    },
+    {
+      "collectionGroup": "reportes_intervenciones",
+      "queryScope": "COLLECTION",
+      "fields": [
+        { "fieldPath": "grupo", "order": "ASCENDING" },
+        { "fieldPath": "timestamp", "order": "DESCENDING" }
+      ]
+    },
+    {
+      "collectionGroup": "reportes_intervenciones",
+      "queryScope": "COLLECTION",
+      "fields": [
+        { "fieldPath": "grupo", "order": "ASCENDING" },
+        { "fieldPath": "id_actividad", "order": "ASCENDING" }
+      ]
+    },
+    {
+      "collectionGroup": "reportes_intervenciones",
+      "queryScope": "COLLECTION",
+      "fields": [
+        { "fieldPath": "grupo", "order": "ASCENDING" },
+        { "fieldPath": "id", "order": "ASCENDING" }
+      ]
     }
   ],
   "fieldOverrides": []

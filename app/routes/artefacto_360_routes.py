@@ -341,29 +341,28 @@ class ReconocimientoResponse(BaseModel):
 
 # ==================== CONFIGURACIÓN DE GRUPOS OPERATIVOS ====================#
 
+# Colección única para todos los reportes de intervención de todos los grupos.
+# El campo "grupo" dentro de cada documento es el discriminador.
+COLLECTION_REPORTES_INTERVENCIONES = "reportes_intervenciones"
+
 GRUPOS_CONFIG = {
     "cuadrilla": {
-        "collection": "reportes_intervenciones_grupo_cuadrilla",
         "display_name": "Cuadrilla",
         "s3_prefix": "cuadrilla",
     },
     "vivero": {
-        "collection": "reportes_intervenciones_grupo_vivero",
         "display_name": "Vivero",
         "s3_prefix": "vivero",
     },
     "gobernanza": {
-        "collection": "reportes_intervenciones_grupo_gobernanza",
         "display_name": "Gobernanza",
         "s3_prefix": "gobernanza",
     },
     "ecosistemas": {
-        "collection": "reportes_intervenciones_grupo_ecosistemas",
         "display_name": "Ecosistemas",
         "s3_prefix": "ecosistemas",
     },
     "umata": {
-        "collection": "reportes_intervenciones_grupo_umata",
         "display_name": "UMATA",
         "s3_prefix": "umata",
     },
@@ -455,13 +454,13 @@ async def _post_reporte_intervencion(
     tipo_intervencion: Optional[str],
     descripcion_intervencion: Optional[str],
     direccion: Optional[str],
-    registrado_por: Optional[str],
-    grupo: Optional[str],
-    id_actividad: Optional[str],
-    observaciones: Optional[str],
-    coordinates_type: Optional[str],
-    coordinates_data: Optional[str],
-    photos: Optional[List[UploadFile]],
+    registrado_por: Optional[str] = None,
+    grupo: Optional[str] = None,
+    id_actividad: Optional[str] = None,
+    observaciones: Optional[str] = None,
+    coordinates_type: Optional[str] = None,
+    coordinates_data: Optional[str] = None,
+    photos: Optional[List[UploadFile]] = None,
     # Campos específicos por grupo (todos opcionales)
     arboles_data: Optional[str] = None,
     tipos_plantas: Optional[str] = None,
@@ -474,7 +473,6 @@ async def _post_reporte_intervencion(
     Maneja todos los grupos operativos con un solo flujo de lógica.
     """
     config = get_grupo_config(grupo_key)
-    collection_name = config["collection"]
     s3_prefix = config["s3_prefix"]
     display_name = config["display_name"]
 
@@ -609,7 +607,7 @@ async def _post_reporte_intervencion(
             "descripcion_intervencion": descripcion_intervencion,
             "direccion": direccion,
             "registrado_por": registrado_por,
-            "grupo": grupo,
+            "grupo": grupo_key,  # Campo canónico desde URL, no del form
             "id_actividad": id_actividad,
             "observaciones": observaciones or "",
             "coordinates": geometry,
@@ -623,9 +621,9 @@ async def _post_reporte_intervencion(
         # Merge campos específicos del grupo
         reporte_data.update(grupo_fields)
 
-        # Guardar en Firebase
+        # Guardar en Firebase (colección unificada)
         try:
-            db.collection(collection_name).document(reporte_id).set(reporte_data)
+            db.collection(COLLECTION_REPORTES_INTERVENCIONES).document(reporte_id).set(reporte_data)
             print(f"✅ Reporte de intervención grupo {display_name} {reporte_id} guardado en Firebase")
         except Exception as e:
             print(f"❌ Error guardando en Firebase: {str(e)}")
@@ -675,7 +673,6 @@ async def _get_reportes_intervenciones(
     Maneja todos los grupos operativos con un solo flujo de lógica.
     """
     config = get_grupo_config(grupo_key)
-    collection_name = config["collection"]
     display_name = config["display_name"]
 
     # Operador y lider solo pueden ver su propio grupo
@@ -685,11 +682,9 @@ async def _get_reportes_intervenciones(
                 status_code=403,
                 detail=f"No tienes acceso al grupo '{grupo_key}'. Solo puedes consultar '{current_user.grupo}'.",
             )
-        # Forzar filtro de grupo a su propio grupo
-        grupo = current_user.grupo
 
     try:
-        reportes_ref = db.collection(collection_name)
+        reportes_ref = db.collection(COLLECTION_REPORTES_INTERVENCIONES)
         bucket_name = os.getenv('S3_BUCKET_NAME', '360-dagma-photos')
         s3_client = None
         try:
@@ -697,11 +692,20 @@ async def _get_reportes_intervenciones(
         except Exception:
             print("⚠️ No se pudo inicializar S3 client para presigned URLs")
 
-        # Si se proporciona un ID específico, buscar directamente
+        # Si se proporciona un ID específico, buscar directamente por document ID
         if id:
             doc = reportes_ref.document(id).get()
             if doc.exists:
                 data = doc.to_dict()
+                # Verificar que el reporte pertenece al grupo solicitado
+                if data.get("grupo") != grupo_key:
+                    return {
+                        "success": True,
+                        "total": 0,
+                        "data": [],
+                        "filters": {"id": id, "id_actividad": id_actividad, "grupo": grupo_key},
+                        "timestamp": datetime.now(timezone.utc).isoformat()
+                    }
                 data['id'] = doc.id
                 reportes = [data]
                 if s3_client:
@@ -710,16 +714,12 @@ async def _get_reportes_intervenciones(
                     "success": True,
                     "total": 1,
                     "data": reportes,
-                    "filters": {
-                        "id": id,
-                        "id_actividad": id_actividad,
-                        "grupo": grupo
-                    },
+                    "filters": {"id": id, "id_actividad": id_actividad, "grupo": grupo_key},
                     "timestamp": datetime.now(timezone.utc).isoformat()
                 }
 
-            # Fallback: buscar por campo interno 'id'
-            docs = reportes_ref.where("id", "==", id).stream()
+            # Fallback: buscar por campo interno 'id' dentro del grupo
+            docs = reportes_ref.where("grupo", "==", grupo_key).where("id", "==", id).stream()
             reportes = []
             for doc in docs:
                 data = doc.to_dict()
@@ -731,11 +731,7 @@ async def _get_reportes_intervenciones(
                     "success": True,
                     "total": 0,
                     "data": [],
-                    "filters": {
-                        "id": id,
-                        "id_actividad": id_actividad,
-                        "grupo": grupo
-                    },
+                    "filters": {"id": id, "id_actividad": id_actividad, "grupo": grupo_key},
                     "timestamp": datetime.now(timezone.utc).isoformat()
                 }
 
@@ -745,22 +741,15 @@ async def _get_reportes_intervenciones(
                 "success": True,
                 "total": len(reportes),
                 "data": reportes,
-                "filters": {
-                    "id": id,
-                    "id_actividad": id_actividad,
-                    "grupo": grupo
-                },
+                "filters": {"id": id, "id_actividad": id_actividad, "grupo": grupo_key},
                 "timestamp": datetime.now(timezone.utc).isoformat()
             }
 
-        # Aplicar filtros opcionales
-        query = reportes_ref
+        # El filtro de grupo_key es siempre obligatorio en la colección unificada
+        query = reportes_ref.where('grupo', '==', grupo_key)
 
         if id_actividad:
             query = query.where('id_actividad', '==', id_actividad.strip())
-
-        if grupo:
-            query = query.where('grupo', '==', grupo.strip())
 
         # Obtener documentos
         docs = query.stream()
@@ -780,7 +769,7 @@ async def _get_reportes_intervenciones(
             "filters": {
                 "id": id,
                 "id_actividad": id_actividad.strip() if id_actividad else None,
-                "grupo": grupo.strip() if grupo else None
+                "grupo": grupo_key,
             },
             "timestamp": datetime.now(timezone.utc).isoformat()
         }
@@ -1895,16 +1884,14 @@ _SLIM_FIELDS = frozenset({
 
 
 async def _fetch_grupo_reportes(grupo_key: str, id_actividad: Optional[str], grupo_filter: Optional[str]) -> tuple[str, list[dict]]:
-    """Fetches reports for a single group collection, returns (grupo_key, list_of_docs)."""
-    config = get_grupo_config(grupo_key)
-    collection_name = config["collection"]
+    """Fetches reports for a single group from the unified collection, returns (grupo_key, list_of_docs)."""
+    get_grupo_config(grupo_key)  # Valida que el grupo es válido
     try:
-        ref = db.collection(collection_name)
-        query = ref
+        ref = db.collection(COLLECTION_REPORTES_INTERVENCIONES)
+        # Siempre filtramos por grupo (campo discriminador en la colección unificada)
+        query = ref.where("grupo", "==", grupo_key)
         if id_actividad:
             query = query.where("id_actividad", "==", id_actividad.strip())
-        if grupo_filter:
-            query = query.where("grupo", "==", grupo_filter.strip())
         docs = query.stream()
         results = []
         for doc in docs:
@@ -1914,7 +1901,7 @@ async def _fetch_grupo_reportes(grupo_key: str, id_actividad: Optional[str], gru
             results.append(data)
         return grupo_key, results
     except Exception as e:
-        logger.warning(f"[reportes_intervenciones] Error leyendo {collection_name}: {e}")
+        logger.warning(f"[reportes_intervenciones] Error leyendo grupo {grupo_key}: {e}")
         return grupo_key, []
 
 
@@ -2313,7 +2300,7 @@ async def patch_asistencia_actividad(
                     detail=f"El email '{patch_persona.email}' no existe en el personal_asignado de esta actividad"
                 )
             idx = indice_email[clave]
-            persona = personal_actual[idx]
+            persona = dict(personal_actual[idx])  # copia para no mutar el original
 
             # Merge: solo sobreescribir campos explicitamente enviados (no-None)
             if patch_persona.validacion is not None:
