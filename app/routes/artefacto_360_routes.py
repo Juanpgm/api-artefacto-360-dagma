@@ -2030,3 +2030,337 @@ async def get_reportes_intervenciones_todos(
         "timestamp": datetime.now(pytz.timezone("America/Bogota")).isoformat(),
     }
 
+
+# ==================== ASISTENCIA ACTIVIDADES ====================#
+
+class AsistenciaPersonaItem(BaseModel):
+    """Registro de asistencia por persona en una actividad"""
+    nombre_completo: str = Field(..., min_length=1, description="Nombre completo del integrante")
+    email: Optional[str] = Field(None, description="Email del integrante")
+    uid: Optional[str] = Field(None, description="UID Firebase del integrante")
+    grupo: Optional[str] = Field(None, description="Grupo operativo al que pertenece")
+    validacion: bool = Field(..., description="true = asistio, false = no asistio")
+    observacion: Optional[str] = Field(None, description="Observacion libre sobre la asistencia")
+    alerta: Optional[str] = Field(None, description="Alerta o novedad relacionada con la asistencia")
+
+
+class AsistenciaActividadRequest(BaseModel):
+    """Body del POST /asistencia_actividades"""
+    actividad_id: str = Field(..., min_length=1, description="ID de la actividad en plan_distrito_verde")
+    personal_asignado: List[AsistenciaPersonaItem] = Field(
+        ..., min_length=1, description="Lista de personal con su validacion de asistencia"
+    )
+
+
+class AsistenciaPatchPersonaItem(BaseModel):
+    """Campos actualizables de una persona en el PATCH de asistencia.
+    email es la clave de busqueda dentro del array personal_asignado."""
+    email: str = Field(..., min_length=1, description="Email del integrante (clave de busqueda)")
+    validacion: Optional[bool] = Field(None, description="true = asistio, false = no asistio")
+    observacion: Optional[str] = Field(None, description="Observacion libre sobre la asistencia")
+    alerta: Optional[str] = Field(None, description="Alerta o novedad relacionada con la asistencia")
+
+
+class AsistenciaActividadPatchRequest(BaseModel):
+    """Body del PATCH /asistencia_actividades/{actividad_id}"""
+    personal: List[AsistenciaPatchPersonaItem] = Field(
+        ..., min_length=1, description="Lista de personas con los campos a actualizar (solo los campos enviados se modifican)"
+    )
+
+
+@router.post(
+    "/asistencia_actividades",
+    summary="🟢 POST | Registrar Asistencia de Actividad",
+    description="""
+## 🟢 POST | Registrar Asistencia de Actividad
+
+**Propósito**: Crea o actualiza el registro de asistencia de una actividad en la coleccion `asistencia_actividades`.
+Si ya existe un documento para el `actividad_id` dado, lo reemplaza con los nuevos datos.
+
+### 📥 Body
+```json
+{
+  "actividad_id": "uuid-de-la-actividad",
+  "personal_asignado": [
+    {
+      "nombre_completo": "Juan Perez",
+      "email": "juan@dagma.gov.co",
+      "uid": "firebase-uid",
+      "grupo": "Cuadrilla",
+      "validacion": true,
+      "observacion": "Llego a tiempo",
+      "alerta": null
+    },
+    {
+      "nombre_completo": "Maria Lopez",
+      "email": "maria@dagma.gov.co",
+      "uid": null,
+      "grupo": "Vivero",
+      "validacion": false,
+      "observacion": null,
+      "alerta": "No se presento sin justificacion"
+    }
+  ]
+}
+```
+
+### 📤 Respuesta exitosa
+- **status**: `success`
+- **id**: ID del documento en `asistencia_actividades` (igual al `actividad_id`)
+- **total_personal**: cantidad de registros guardados
+    """,
+    tags=["Artefacto de Captura DAGMA"],
+)
+async def post_asistencia_actividad(
+    body: AsistenciaActividadRequest,
+    current_user: CurrentUser = Depends(require_min_role(Role.LIDER)),
+):
+    """
+    Crea o reemplaza el registro de asistencia para una actividad.
+    Usa actividad_id como ID del documento en Firestore.
+    """
+    try:
+        tz_col = pytz.timezone("America/Bogota")
+        ahora = datetime.now(tz_col).isoformat()
+
+        personal_data = [p.model_dump() for p in body.personal_asignado]
+
+        total_personal = len(personal_data)
+        asistentes = sum(1 for p in personal_data if p["validacion"] is True)
+        ausentes = total_personal - asistentes
+        asistencia_general = round((asistentes / total_personal) * 100, 2) if total_personal > 0 else 0.0
+
+        doc_data = {
+            "actividad_id": body.actividad_id.strip(),
+            "personal_asignado": personal_data,
+            "total_personal": total_personal,
+            "asistentes": asistentes,
+            "ausentes": ausentes,
+            "asistencia_general": asistencia_general,
+            "marca_temporal": ahora,
+            "registrado_por": current_user.uid,
+        }
+
+        db.collection("asistencia_actividades").document(body.actividad_id.strip()).set(doc_data)
+
+        return {
+            "status": "success",
+            "message": "Asistencia registrada exitosamente",
+            "id": body.actividad_id.strip(),
+            "data": doc_data,
+            "timestamp": ahora,
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error registrando asistencia: {str(e)}")
+
+
+@router.get(
+    "/asistencia_actividades",
+    summary="🔵 GET | Obtener Asistencia de Actividad",
+    description="""
+## 🔵 GET | Obtener Asistencia de Actividad
+
+**Propósito**: Consulta el registro de asistencia de una actividad especifica en la coleccion `asistencia_actividades`.
+
+### 📥 Parametros
+- **actividad_id** (requerido): ID de la actividad en `plan_distrito_verde`
+- **solo_alertas** (opcional): Si `true`, retorna solo los integrantes que tienen `alerta` no nula
+
+### 📝 Ejemplos
+```javascript
+// Asistencia de una actividad especifica
+fetch('/asistencia_actividades?actividad_id=uuid-actividad');
+
+// Solo integrantes con alertas
+fetch('/asistencia_actividades?actividad_id=uuid-actividad&solo_alertas=true');
+```
+    """,
+    tags=["Artefacto de Captura DAGMA"],
+)
+async def get_asistencia_actividades(
+    response: Response,
+    actividad_id: str = Query(..., min_length=1, description="ID de la actividad a consultar"),
+    solo_alertas: bool = Query(False, description="Retornar solo integrantes con alerta no nula"),
+    current_user: CurrentUser = Depends(require_min_role(Role.LIDER)),
+):
+    """
+    Obtiene el registro de asistencia de una actividad. actividad_id es requerido.
+    """
+    try:
+        tz_col = pytz.timezone("America/Bogota")
+        col_ref = db.collection("asistencia_actividades")
+
+        doc = col_ref.document(actividad_id.strip()).get()
+        if not doc.exists:
+            raise HTTPException(
+                status_code=404,
+                detail=f"No se encontro asistencia para actividad_id '{actividad_id}'"
+            )
+
+        data = doc.to_dict()
+
+        # Recalcular metrica en vuelo (garantiza precision aunque el doc sea legacy)
+        personal_full = data.get("personal_asignado", [])
+        total_personal = len(personal_full)
+        asistentes = sum(1 for p in personal_full if p.get("validacion") is True)
+        ausentes = total_personal - asistentes
+        asistencia_general = round((asistentes / total_personal) * 100, 2) if total_personal > 0 else 0.0
+
+        if solo_alertas:
+            data["personal_asignado"] = [p for p in personal_full if p.get("alerta")]
+
+        response.headers["Cache-Control"] = "no-cache"
+        return {
+            "status": "success",
+            "data": data,
+            "metricas": {
+                "total_personal": total_personal,
+                "asistentes": asistentes,
+                "ausentes": ausentes,
+                "asistencia_general": asistencia_general,
+            },
+            "filters": {
+                "actividad_id": actividad_id.strip(),
+                "solo_alertas": solo_alertas,
+            },
+            "timestamp": datetime.now(tz_col).isoformat(),
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error consultando asistencia: {str(e)}")
+
+
+@router.patch(
+    "/asistencia_actividades/{actividad_id}",
+    summary="🟡 PATCH | Actualizar Asistencia de Integrante",
+    description="""
+## 🟡 PATCH | Actualizar Asistencia de Integrante
+
+**Proposito**: Actualiza parcialmente la asistencia de uno o varios integrantes de una actividad.
+Ideal para auto-save en UI: envia solo los campos que cambiaron, sin reenviar la lista completa.
+
+**El documento debe existir** (crearlo primero con `POST /asistencia_actividades`).
+
+### 📥 Path
+- **actividad_id**: ID de la actividad (igual al usado en el POST)
+
+### 📥 Body
+Enviar solo los campos que cambiaron. `email` es requerido como clave de busqueda.
+```json
+{
+  "personal": [
+    {
+      "email": "juan@dagma.gov.co",
+      "validacion": false,
+      "alerta": "No se presento sin justificacion"
+    }
+  ]
+}
+```
+
+### 📤 Respuesta
+- **data**: documento completo actualizado
+- **metricas**: asistencia_general recalculada
+- **actualizados**: lista de emails que fueron modificados
+
+### ⚠️ Errores
+- **404**: no existe registro de asistencia para ese `actividad_id` (usar POST primero)
+- **422**: algun email del body no existe en el `personal_asignado` del documento
+    """,
+    tags=["Artefacto de Captura DAGMA"],
+)
+async def patch_asistencia_actividad(
+    actividad_id: str,
+    body: AsistenciaActividadPatchRequest,
+    current_user: CurrentUser = Depends(require_min_role(Role.LIDER)),
+):
+    """
+    Actualiza parcialmente la asistencia de uno o varios integrantes.
+    Solo modifica los campos enviados (None = sin cambio).
+    Recalcula metricas tras cada actualizacion.
+    """
+    try:
+        tz_col = pytz.timezone("America/Bogota")
+        ahora = datetime.now(tz_col).isoformat()
+
+        doc_ref = db.collection("asistencia_actividades").document(actividad_id.strip())
+        doc = doc_ref.get()
+
+        if not doc.exists:
+            raise HTTPException(
+                status_code=404,
+                detail=f"No existe registro de asistencia para actividad_id '{actividad_id}'. Crealo primero con POST /asistencia_actividades"
+            )
+
+        data = doc.to_dict()
+        personal_actual = data.get("personal_asignado", [])
+
+        # Construir indice email -> posicion para busqueda O(1)
+        indice_email = {
+            p.get("email", "").strip().lower(): i
+            for i, p in enumerate(personal_actual)
+        }
+
+        actualizados = []
+        for patch_persona in body.personal:
+            clave = patch_persona.email.strip().lower()
+            if clave not in indice_email:
+                raise HTTPException(
+                    status_code=422,
+                    detail=f"El email '{patch_persona.email}' no existe en el personal_asignado de esta actividad"
+                )
+            idx = indice_email[clave]
+            persona = personal_actual[idx]
+
+            # Merge: solo sobreescribir campos explicitamente enviados (no-None)
+            if patch_persona.validacion is not None:
+                persona["validacion"] = patch_persona.validacion
+            if patch_persona.observacion is not None:
+                persona["observacion"] = patch_persona.observacion
+            if patch_persona.alerta is not None:
+                persona["alerta"] = patch_persona.alerta
+
+            personal_actual[idx] = persona
+            actualizados.append(patch_persona.email)
+
+        # Recalcular metricas
+        total_personal = len(personal_actual)
+        asistentes = sum(1 for p in personal_actual if p.get("validacion") is True)
+        ausentes = total_personal - asistentes
+        asistencia_general = round((asistentes / total_personal) * 100, 2) if total_personal > 0 else 0.0
+
+        doc_ref.update({
+            "personal_asignado": personal_actual,
+            "asistentes": asistentes,
+            "ausentes": ausentes,
+            "asistencia_general": asistencia_general,
+            "ultima_modificacion": ahora,
+        })
+
+        data["personal_asignado"] = personal_actual
+        data["asistentes"] = asistentes
+        data["ausentes"] = ausentes
+        data["asistencia_general"] = asistencia_general
+        data["ultima_modificacion"] = ahora
+
+        return {
+            "status": "success",
+            "message": f"{len(actualizados)} integrante(s) actualizados",
+            "actualizados": actualizados,
+            "data": data,
+            "metricas": {
+                "total_personal": total_personal,
+                "asistentes": asistentes,
+                "ausentes": ausentes,
+                "asistencia_general": asistencia_general,
+            },
+            "timestamp": ahora,
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error actualizando asistencia: {str(e)}")
+
