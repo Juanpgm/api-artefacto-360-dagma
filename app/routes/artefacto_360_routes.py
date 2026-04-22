@@ -214,8 +214,7 @@ async def upload_photos_to_s3(photos: List[UploadFile], grupo: str, reporte_id: 
     # Ejecutar todas las cargas concurrentemente
     tasks = [upload_single_photo(i, photo) for i, photo in enumerate(photos)]
     documentos = await asyncio.gather(*tasks)
-
-    # Fin función
+    return list(documentos)
 
 
 def generar_documentos_con_enlaces(documentos: list, s3_client, bucket_name: str) -> list:
@@ -380,6 +379,14 @@ def get_grupo_config(grupo: str) -> dict:
             detail=f"Grupo '{grupo}' no encontrado. Grupos válidos: {', '.join(GRUPOS_VALIDOS)}"
         )
     return config
+
+
+def _limpiar_reporte(data: dict) -> dict:
+    """
+    Elimina claves con valor None del documento antes de enviarlo al cliente.
+    Evita enviar campos vacíos de otros grupos (ej: 'arboles: null' en vivero).
+    """
+    return {k: v for k, v in data.items() if v is not None}
 
 
 def validate_grupo_specific_fields(
@@ -621,6 +628,9 @@ async def _post_reporte_intervencion(
         # Merge campos específicos del grupo
         reporte_data.update(grupo_fields)
 
+        # Eliminar campos None antes de guardar: evita guardar claves vacías de otros grupos
+        reporte_data = {k: v for k, v in reporte_data.items() if v is not None}
+
         # Guardar en Firebase (colección unificada)
         try:
             db.collection(COLLECTION_REPORTES_INTERVENCIONES).document(reporte_id).set(reporte_data)
@@ -707,7 +717,7 @@ async def _get_reportes_intervenciones(
                         "timestamp": datetime.now(timezone.utc).isoformat()
                     }
                 data['id'] = doc.id
-                reportes = [data]
+                reportes = [_limpiar_reporte(data)]
                 if s3_client:
                     enriquecer_reportes_con_enlaces(reportes, s3_client, bucket_name)
                 return {
@@ -724,7 +734,7 @@ async def _get_reportes_intervenciones(
             for doc in docs:
                 data = doc.to_dict()
                 data['id'] = doc.id
-                reportes.append(data)
+                reportes.append(_limpiar_reporte(data))
 
             if not reportes:
                 return {
@@ -758,7 +768,7 @@ async def _get_reportes_intervenciones(
         for doc in docs:
             data = doc.to_dict()
             data['id'] = doc.id
-            reportes.append(data)
+            reportes.append(_limpiar_reporte(data))
 
         if s3_client:
             enriquecer_reportes_con_enlaces(reportes, s3_client, bucket_name)
@@ -790,43 +800,129 @@ async def _get_reportes_intervenciones(
     description="""
 ## 🟢 POST | Registrar Reporte de Intervención — Endpoint Unificado
 
-**Propósito**: Registrar un reporte de intervención para cualquier grupo operativo DAGMA.
+Registra un reporte de intervención en la colección unificada `reportes_intervenciones` de Firestore.
+El campo `grupo` se asigna automáticamente desde el parámetro de ruta `grupo_key`; no es necesario enviarlo en el body.
+El campo `registrado_por` se toma del token de autenticación (`current_user.email`).
 
-### 🏷️ Grupos válidos (usar en la URL):
-`cuadrilla`, `vivero`, `gobernanza`, `ecosistemas`, `umata`
+**Autenticación**: Requiere `Authorization: Bearer <firebase_id_token>` en el header.
 
-**Ejemplo**: `POST /grupos/cuadrilla/reporte_intervencion`
+---
 
-### ✅ Campos comunes (todos los grupos):
-- **tipo_intervencion**: Tipo de intervención realizada
-- **descripcion_intervencion**: Descripción detallada
-- **direccion**: Dirección de la intervención
-- **registrado_por**: Persona que registra
-- **grupo**: Grupo operativo
-- **id_actividad**: ID de la actividad asociada
-- **observaciones**: Observaciones adicionales
-- **coordinates_type**: Tipo de geometría (Point, LineString, Polygon)
-- **coordinates_data**: Coordenadas GPS en formato JSON array
-- **photos**: Archivos de fotos (máximo 10)
+### 🏷️ Grupos válidos (`grupo_key` en la URL)
+| grupo_key | Grupo operativo |
+|---|---|
+| `cuadrilla` | Cuadrilla de intervención |
+| `vivero` | Vivero municipal |
+| `gobernanza` | Gobernanza ambiental |
+| `ecosistemas` | Ecosistemas |
+| `umata` | UMATA |
 
-### 🔧 Campos específicos por grupo:
-- **Cuadrilla** → `arboles_data`: JSON array de árboles `[{"especie": "Ceiba", "cantidad": 5}]`
-- **Vivero** → `tipos_plantas`: JSON dict de plantas `{"Guayacán": 10, "Ceiba": 5}`
-- **Gobernanza** → `unidades_impactadas`: Número entero
-- **Ecosistemas** → `unidad_medida` + `unidades_impactadas`
-- **UMATA** → `unidades_impactadas`: Número entero
+---
 
-### 📝 Ejemplo:
-```javascript
-const formData = new FormData();
-formData.append('tipo_intervencion', 'Mantenimiento');
-formData.append('descripcion_intervencion', 'Poda de árboles');
-formData.append('coordinates_type', 'Point');
-formData.append('coordinates_data', '[-76.5225, 3.4516]');
-formData.append('photos', file1);
+### 📋 Campos del formulario (`multipart/form-data`)
 
-fetch('/grupos/cuadrilla/reporte_intervencion', { method: 'POST', body: formData });
+#### Comunes a todos los grupos
+| Campo | Tipo | Requerido | Descripción |
+|---|---|---|---|
+| `tipo_intervencion` | string | ✅ | Tipo de intervención (ej: "Poda", "Siembra") |
+| `descripcion_intervencion` | string | — | Descripción detallada de la actividad |
+| `direccion` | string | — | Dirección física donde se realizó |
+| `id_actividad` | string | — | ID de la actividad asociada (ej: `ACT-2026-001`) |
+| `observaciones` | string | — | Observaciones adicionales |
+| `coordinates_type` | string | — | Tipo de geometría GeoJSON: `Point`, `LineString`, `Polygon` |
+| `coordinates_data` | string | — | Coordenadas en formato JSON array. Point: `[-76.5225, 3.4516]`; Polygon: `[[-76.5,3.4],[-76.6,3.4],[-76.6,3.5],[-76.5,3.4]]` |
+| `photos` | archivo(s) | — | Imágenes JPG/PNG/WEBP/HEIC. Máximo 10. Subidas a AWS S3. |
+
+#### Específicos por grupo (ignorados si el grupo no los usa)
+| Campo | Grupo | Tipo | Descripción |
+|---|---|---|---|
+| `arboles_data` | `cuadrilla` | JSON array | Lista de árboles: `[{"especie": "Ceiba", "cantidad": 5}]` |
+| `tipos_plantas` | `vivero` | JSON dict | Plantas por especie: `{"Guayacán": 10, "Ceiba": 5}` |
+| `unidades_impactadas` | `gobernanza`, `ecosistemas`, `umata` | integer | Número de unidades impactadas |
+| `unidad_medida` | `ecosistemas` | string | Unidad de medida (ej: `m²`, `hectáreas`, `individuos`) |
+
+---
+
+### 📤 Respuesta exitosa (`200 OK`)
+```json
+{
+  "success": true,
+  "id": "uuid-del-reporte",
+  "message": "Reporte de intervención del grupo Cuadrilla registrado exitosamente",
+  "coordinates": { "type": "Point", "coordinates": [-76.5225, 3.4516] },
+  "photosUrl": ["https://bucket.s3.amazonaws.com/reportes/cuadrilla/.../foto.jpg"],
+  "photos_uploaded": 1,
+  "documentos_con_enlaces": [...],
+  "timestamp": "2026-04-22T10:30:00-05:00"
+}
 ```
+
+---
+
+### 🔑 Ejemplos cURL
+
+**Cuadrilla — con árboles y foto:**
+```bash
+curl -X POST "https://web-production-2d737.up.railway.app/grupos/cuadrilla/reporte_intervencion" \\
+  -H "Authorization: Bearer <firebase_id_token>" \\
+  -F "tipo_intervencion=Poda de emergencia" \\
+  -F "descripcion_intervencion=Poda preventiva por tormenta eléctrica" \\
+  -F "direccion=Calle 5 con Carrera 10, Barrio El Lido" \\
+  -F "id_actividad=ACT-2026-001" \\
+  -F "coordinates_type=Point" \\
+  -F "coordinates_data=[-76.5225, 3.4516]" \\
+  -F 'arboles_data=[{"especie":"Ceiba pentandra","cantidad":3},{"especie":"Saman","cantidad":2}]' \\
+  -F "photos=@/ruta/local/foto.jpg;type=image/jpeg"
+```
+
+**Vivero — con tipos de plantas (sin foto):**
+```bash
+curl -X POST "https://web-production-2d737.up.railway.app/grupos/vivero/reporte_intervencion" \\
+  -H "Authorization: Bearer <firebase_id_token>" \\
+  -F "tipo_intervencion=Siembra de compensacion" \\
+  -F "id_actividad=ACT-2026-002" \\
+  -F 'tipos_plantas={"Guayacan amarillo":10,"Ceiba tolua":5}'
+```
+
+**Gobernanza — con unidades impactadas:**
+```bash
+curl -X POST "https://web-production-2d737.up.railway.app/grupos/gobernanza/reporte_intervencion" \\
+  -H "Authorization: Bearer <firebase_id_token>" \\
+  -F "tipo_intervencion=Taller comunitario" \\
+  -F "descripcion_intervencion=Educacion ambiental barrio El Lido" \\
+  -F "id_actividad=ACT-2026-003" \\
+  -F "unidades_impactadas=45"
+```
+
+**Ecosistemas — con unidad de medida:**
+```bash
+curl -X POST "https://web-production-2d737.up.railway.app/grupos/ecosistemas/reporte_intervencion" \\
+  -H "Authorization: Bearer <firebase_id_token>" \\
+  -F "tipo_intervencion=Monitoreo de fauna" \\
+  -F "id_actividad=ACT-2026-004" \\
+  -F "unidad_medida=individuos" \\
+  -F "unidades_impactadas=120"
+```
+
+**UMATA — básico:**
+```bash
+curl -X POST "https://web-production-2d737.up.railway.app/grupos/umata/reporte_intervencion" \\
+  -H "Authorization: Bearer <firebase_id_token>" \\
+  -F "tipo_intervencion=Asistencia tecnica agricola" \\
+  -F "id_actividad=ACT-2026-005" \\
+  -F "unidades_impactadas=30"
+```
+
+---
+
+### ⚠️ Errores comunes
+| Código | Causa |
+|---|---|
+| `401` | Token ausente o inválido |
+| `403` | El usuario no tiene permiso para registrar en este grupo |
+| `404` | `grupo_key` no existe |
+| `400` | JSON inválido en `arboles_data` o `tipos_plantas`, tipo de geometría inválido, o foto con formato no permitido |
+| `500` | Error en Firebase o S3 |
     """,
     response_model=ReconocimientoResponse
 )
@@ -874,24 +970,97 @@ async def post_reporte_intervencion_unificado(
     description="""
 ## 🔵 GET | Obtener Reportes de Intervención — Endpoint Unificado
 
-**Propósito**: Consultar reportes de intervención de cualquier grupo operativo DAGMA.
+Consulta reportes de intervención de un grupo operativo desde la colección unificada `reportes_intervenciones`.
+Cada documento retornado contiene **solo los campos relevantes para ese grupo** (sin claves vacías de otros grupos).
 
-### 🏷️ Grupos válidos (usar en la URL):
-`cuadrilla`, `vivero`, `gobernanza`, `ecosistemas`, `umata`
+**Autenticación**: Requiere `Authorization: Bearer <firebase_id_token>` en el header.
+Los roles `lider` y `operador` solo pueden consultar su propio grupo. `administrador` puede consultar cualquiera.
 
-**Ejemplo**: `GET /grupos/vivero/reportes_intervenciones`
+---
 
-### 📥 Parámetros de Filtrado (opcionales):
-- **id**: Filtrar por ID específico del reporte
-- **id_actividad**: Filtrar por ID de actividad asociada
-- **grupo**: Filtrar por nombre del grupo operativo
+### 🏷️ Grupos válidos (`grupo_key` en la URL)
+`cuadrilla` · `vivero` · `gobernanza` · `ecosistemas` · `umata`
 
-### 📝 Ejemplos:
-```javascript
-fetch('/grupos/cuadrilla/reportes_intervenciones');
-fetch('/grupos/vivero/reportes_intervenciones?id_actividad=ACT-2026-1234');
-fetch('/grupos/ecosistemas/reportes_intervenciones?id=abc-123-xyz');
+---
+
+### 📥 Query parameters (todos opcionales)
+| Parámetro | Descripción |
+|---|---|
+| `id` | ID exacto del documento en Firestore. Retorna `total: 1` o `total: 0`. |
+| `id_actividad` | Filtra todos los reportes de esa actividad para el grupo. |
+
+> El filtro por `grupo` está implícito en la ruta — siempre se aplica `grupo == grupo_key`.
+
+---
+
+### 📤 Estructura de respuesta (`200 OK`)
+```json
+{
+  "success": true,
+  "total": 2,
+  "filters": {
+    "grupo": "cuadrilla",
+    "id_actividad": "ACT-2026-001",
+    "id": null
+  },
+  "data": [
+    {
+      "id": "uuid-del-reporte",
+      "grupo": "cuadrilla",
+      "tipo_intervencion": "Poda",
+      "descripcion_intervencion": "...",
+      "direccion": "Calle 5 con Carrera 10",
+      "registrado_por": "usuario@dagma.gov.co",
+      "id_actividad": "ACT-2026-001",
+      "observaciones": "",
+      "coordinates": { "type": "Point", "coordinates": [-76.5225, 3.4516] },
+      "comuna_corregimiento": "COMUNA 2",
+      "barrio_vereda": "El Lido",
+      "arboles": [{ "especie": "Ceiba", "cantidad": 3 }],
+      "documentos": [...],
+      "documentos_con_enlaces": [...],
+      "total_documentos": 1,
+      "photos_uploaded": 1,
+      "timestamp": "2026-04-22T10:30:00-05:00"
+    }
+  ],
+  "timestamp": "2026-04-22T15:00:00+00:00"
+}
 ```
+
+> Los campos específicos de grupo (`arboles`, `tipos_plantas`, `cantidad_total_plantas`, `unidades_impactadas`, `unidad_medida`) **solo aparecen si fueron guardados**. No se envían con valor `null` si no aplican al grupo.
+
+---
+
+### 🔑 Ejemplos cURL
+
+**Todos los reportes de cuadrilla:**
+```bash
+curl -X GET "https://web-production-2d737.up.railway.app/grupos/cuadrilla/reportes_intervenciones" \\
+  -H "Authorization: Bearer <firebase_id_token>"
+```
+
+**Filtrar por actividad:**
+```bash
+curl -X GET "https://web-production-2d737.up.railway.app/grupos/vivero/reportes_intervenciones?id_actividad=ACT-2026-001" \\
+  -H "Authorization: Bearer <firebase_id_token>"
+```
+
+**Buscar un reporte por su ID:**
+```bash
+curl -X GET "https://web-production-2d737.up.railway.app/grupos/gobernanza/reportes_intervenciones?id=abc123-uuid" \\
+  -H "Authorization: Bearer <firebase_id_token>"
+```
+
+---
+
+### ⚠️ Errores comunes
+| Código | Causa |
+|---|---|
+| `401` | Token ausente o inválido |
+| `403` | El usuario no tiene permiso para consultar este grupo |
+| `404` | `grupo_key` no existe |
+| `500` | Error en Firebase o S3 |
     """
 )
 async def get_reportes_intervenciones_unificado(
