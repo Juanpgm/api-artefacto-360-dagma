@@ -1,0 +1,56 @@
+name: Dev CI
+on:
+  push:
+    branches: [dev]
+  pull_request:
+    branches: [master, main]
+
+jobs:
+  detect-changes:
+    runs-on: ubuntu-latest
+    outputs:
+      skip: ${{ steps.check.outputs.skip }}
+    steps:
+      - uses: actions/checkout@v4
+        with: { fetch-depth: 2 }
+      - id: check
+        run: |
+          MSG=$(git log -1 --pretty=%B)
+          if echo "$MSG" | grep -qE '\[skip ci\]|\[ci skip\]'; then
+            echo "skip=true" >> $GITHUB_OUTPUT
+          else
+            echo "skip=false" >> $GITHUB_OUTPUT
+          fi
+
+  back:
+    needs: detect-changes
+    if: needs.detect-changes.outputs.skip != 'true' && hashFiles('requirements.txt', 'pyproject.toml') != ''
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: '3.12' }
+      - run: pip install -r requirements.txt
+      - run: pip install pytest pytest-asyncio pytest-cov ruff bandit
+      - run: ruff check .
+      - run: bandit -r app/ -x tests/ || true
+      - run: pytest -q --cov=app --cov-report=term
+        env:
+          ENVIRONMENT: test
+          LLM_DEFAULT_MODEL: ollama/qwen2.5:7b
+
+  front:
+    needs: detect-changes
+    if: needs.detect-changes.outputs.skip != 'true' && hashFiles('package.json') != ''
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with: { version: 9 }
+      - uses: actions/setup-node@v4
+        with: { node-version: '20', cache: 'pnpm' }
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm run check || true
+      - run: pnpm run lint || true
+      - run: pnpm run build
+      - run: pnpm test --if-present

@@ -1,0 +1,53 @@
+name: Dev → Master PR
+on:
+  push:
+    branches: [dev]
+
+permissions:
+  contents: read
+  pull-requests: write
+
+jobs:
+  auto-pr:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with: { fetch-depth: 0 }
+
+      - name: Generate change report
+        id: report
+        run: |
+          {
+            echo "## 🤖 Auto PR: dev → master"
+            echo ""
+            echo "### Commits since master"
+            git log master..dev --oneline --no-merges | head -30
+            echo ""
+            echo "### Files changed"
+            git diff --stat master..dev | tail -40
+            echo ""
+            echo "### Diff summary"
+            echo '```'
+            git diff master..dev --shortstat
+            echo '```'
+          } > /tmp/pr-body.md
+          {
+            echo "body<<EOF"
+            cat /tmp/pr-body.md
+            echo "EOF"
+          } >> $GITHUB_OUTPUT
+
+      - name: Open / update PR
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          EXISTING=$(gh pr list --head dev --base master --json number --jq '.[0].number' || echo "")
+          if [ -z "$EXISTING" ]; then
+            gh pr create --base master --head dev \
+              --title "🤖 dev → master ($(date +%Y-%m-%d))" \
+              --body "${{ steps.report.outputs.body }}" \
+              --label "auto-pr,from-dev" || true
+          else
+            gh pr edit "$EXISTING" --body "${{ steps.report.outputs.body }}"
+            gh pr comment "$EXISTING" --body "🔄 Actualizado con nuevos commits en dev ($(date -u))."
+          fi

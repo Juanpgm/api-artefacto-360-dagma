@@ -1,0 +1,21 @@
+name: Back · Prod Deploy (Railway)
+on:
+  push:
+    branches: [master, main]
+
+jobs:
+  deploy:
+    if: hashFiles('requirements.txt', 'pyproject.toml') != ''
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: '20' }
+      - run: npm install -g @railway/cli
+      - run: railway up --service ${{ secrets.RAILWAY_SERVICE || 'back' }} --detach
+        env:
+          RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
+      - name: Health check
+        run: |
+          sleep 45
+          curl -fsS ${{ secrets.RAILWAY_HEALTH_URL }} || exit 1
