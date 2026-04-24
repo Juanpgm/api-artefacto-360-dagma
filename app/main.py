@@ -69,7 +69,8 @@ app.add_middleware(
         "http://localhost:5175",      # Vite alternate
         # Producción
         "https://web-production-2d737.up.railway.app",  # Railway API
-        "https://dagma-360-capture-frontend.vercel.app",  # Frontend Vercel
+        "https://artefacto-calitrack-360-frontend-pr.vercel.app",  # Frontend Vercel (production)
+        "https://dagma-360-capture-frontend.vercel.app",  # Frontend Vercel (legacy)
         "https://tu-dominio-produccion.com"  # Dominio custom adicional
     ],
     allow_credentials=True,
