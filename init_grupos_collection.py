@@ -36,7 +36,7 @@ GRUPOS_EMAILS: dict[str, str] = {
     "Cambio Climatico":       "marcela.villa@cali.gov.co",
     "Gobernanza":             "viviana.ospina@cali.gov.co",
     "Huertas Urbanas":        "huertas@cali.gov.co",
-    "Flora Urbana (Cuadrilla)": "flora.coordinacion@cali.gov.co",
+    "Cuadrilla":                "flora.coordinacion@cali.gov.co",
     "Central Social":         "Centralsocialdagma@cali.gov.co",
 }
 
