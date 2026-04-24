@@ -2467,21 +2467,56 @@ async def get_asistencias_resumen(
             asistencia_general = round((asistentes / total) * 100, 2) if total > 0 else 0.0
             grupos_participantes = sorted({p.get("grupo", "") for p in personal_list if p.get("grupo")})
 
+            # Personal sin datos personales (sin email, uid)
+            personal_publico = [
+                {
+                    "nombre_completo": p.get("nombre_completo", "—"),
+                    "grupo": p.get("grupo"),
+                    "validacion": p.get("validacion"),
+                    "observacion": p.get("observacion"),
+                    "alerta": p.get("alerta"),
+                }
+                for p in personal_list
+            ]
+
+            # Datos de la actividad desde plan_distrito_verde
+            actividad_info: dict = {}
+            try:
+                act_doc = db.collection("plan_distrito_verde").document(doc.id).get()
+                if act_doc.exists:
+                    act = act_doc.to_dict() or {}
+                    punto = act.get("punto_encuentro") or {}
+                    actividad_info = {
+                        "fecha_actividad": act.get("fecha_actividad"),
+                        "hora_encuentro": act.get("hora_encuentro"),
+                        "tipo_jornada": act.get("tipo_jornada"),
+                        "objetivo_actividad": act.get("objetivo_actividad"),
+                        "estado_actividad": act.get("estado_actividad"),
+                        "direccion": punto.get("direccion"),
+                        "comunas_corregimiento": punto.get("comunas_corregimiento"),
+                        "barrio_vereda": punto.get("barrio_vereda"),
+                    }
+            except Exception:
+                pass  # Si falla la búsqueda del plan, continuar con lo disponible
+
             resultado.append({
                 "actividad_id": doc.id,
                 "fecha_registro": data.get("ultima_modificacion") or data.get("marca_temporal"),
-                "registrado_por": data.get("registrado_por"),
                 "total_personal": total,
                 "asistentes": asistentes,
                 "ausentes": ausentes,
                 "alertas": alertas,
                 "asistencia_general": asistencia_general,
                 "grupos_participantes": grupos_participantes,
-                "personal_asignado": personal_list,
+                "personal_asignado": personal_publico,
+                **actividad_info,
             })
 
-        # Ordenar por fecha descendente
-        resultado.sort(key=lambda x: x.get("fecha_registro") or "", reverse=True)
+        # Ordenar por fecha_actividad descendente (o fecha_registro si no hay)
+        resultado.sort(
+            key=lambda x: x.get("fecha_actividad") or x.get("fecha_registro") or "",
+            reverse=True,
+        )
 
         return {
             "status": "success",
