@@ -2051,8 +2051,8 @@ _GRUPOS_KEYS = ["cuadrilla", "vivero", "gobernanza", "ecosistemas", "umata"]
 
 _SLIM_FIELDS = frozenset({
     "id", "timestamp", "grupo", "tipo_intervencion", "barrio_vereda",
-    "descripcion_intervencion", "photosUrl", "registrado_por", "direccion",
-    "photos_uploaded", "documentos_con_enlaces",
+    "comuna_corregimiento", "descripcion_intervencion", "photosUrl",
+    "registrado_por", "direccion", "photos_uploaded", "documentos_con_enlaces",
 })
 
 
@@ -2661,4 +2661,96 @@ async def patch_asistencia_actividad(
         raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error actualizando asistencia: {str(e)}")
+
+
+# ==================== ADMIN: Backfill Geo Data ====================#
+
+@router.post(
+    "/admin/backfill_geo_intervenciones",
+    summary="🔧 ADMIN | Recalcular barrio_vereda / comuna_corregimiento en intervenciones",
+    tags=["Artefacto de Captura DAGMA"],
+    include_in_schema=True,
+)
+async def backfill_geo_intervenciones(
+    dry_run: bool = False,
+    current_user: CurrentUser = Depends(get_current_user),
+):
+    """
+    Recorre todos los documentos de `reportes_intervenciones` que tienen coordenadas Point
+    pero carecen de `barrio_vereda` y/o `comuna_corregimiento` y los actualiza.
+
+    - **dry_run=true**: solo reporta cuántos se actualizarían, sin escribir en Firestore.
+    - Requiere rol **administrador**.
+    """
+    if not current_user.at_least(Role.ADMINISTRADOR):
+        raise HTTPException(
+            status_code=403,
+            detail="Solo un administrador puede ejecutar el backfill de datos geográficos.",
+        )
+
+    col = db.collection(COLLECTION_REPORTES_INTERVENCIONES)
+    docs = col.stream()
+
+    actualizados: list[dict] = []
+    omitidos = 0
+    errores = 0
+
+    for doc in docs:
+        data = doc.to_dict()
+        coords_field = data.get("coordinates")
+
+        # Solo procesamos puntos
+        if not coords_field or coords_field.get("type") != "Point":
+            omitidos += 1
+            continue
+
+        # Si ya tiene ambos campos poblados, omitir
+        if data.get("barrio_vereda") and data.get("comuna_corregimiento"):
+            omitidos += 1
+            continue
+
+        raw_coords = coords_field.get("coordinates")
+        if not raw_coords or len(raw_coords) < 2:
+            omitidos += 1
+            continue
+
+        try:
+            comuna, barrio = get_location_from_coordinates(raw_coords)
+        except Exception as exc:
+            print(f"⚠️ Error geo para doc {doc.id}: {exc}")
+            errores += 1
+            continue
+
+        if not comuna and not barrio:
+            # Coordenadas fuera del área cartografiada
+            omitidos += 1
+            continue
+
+        update_payload: dict = {}
+        if not data.get("barrio_vereda") and barrio:
+            update_payload["barrio_vereda"] = barrio
+        if not data.get("comuna_corregimiento") and comuna:
+            update_payload["comuna_corregimiento"] = comuna
+
+        if not update_payload:
+            omitidos += 1
+            continue
+
+        if not dry_run:
+            col.document(doc.id).update(update_payload)
+
+        actualizados.append({
+            "id": doc.id,
+            "grupo": data.get("grupo"),
+            **update_payload,
+        })
+
+    return {
+        "status": "success",
+        "dry_run": dry_run,
+        "actualizados": len(actualizados),
+        "omitidos": omitidos,
+        "errores": errores,
+        "detalle": actualizados,
+    }
 
