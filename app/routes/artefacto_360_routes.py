@@ -32,6 +32,7 @@ from app.services.gmail_service import (
     send_activity_confirmation_email,
     send_assignment_notification_email,
     send_removal_notification_email,
+    send_leaders_notification_email,
 )
 from app.services.calendar_service import create_activity_event, sync_event_personnel
 
@@ -214,6 +215,16 @@ async def upload_photos_to_s3(photos: List[UploadFile], grupo: str, reporte_id: 
             }
             print(f"⚠️ Modo desarrollo: URL ficticia generada para {photo.filename}")
             return doc_meta
+
+    # Deduplica: el frontend envía la misma foto dos veces cuando hay una sola
+    # (workaround para la coerción de FastAPI de UploadFile → List[UploadFile]).
+    seen_names: set = set()
+    unique_photos = []
+    for photo in photos:
+        if photo.filename not in seen_names:
+            seen_names.add(photo.filename)
+            unique_photos.append(photo)
+    photos = unique_photos
 
     # Ejecutar todas las cargas concurrentemente
     tasks = [upload_single_photo(i, photo) for i, photo in enumerate(photos)]
@@ -488,9 +499,9 @@ async def _post_reporte_intervencion(
     display_name = config["display_name"]
 
     # Cualquier usuario autenticado puede registrar intervenciones en cualquier grupo.
-    # Solo se fuerza el registrado_por desde el token para no confiar en el form.
+    # Se usa el nombre completo (o email) del usuario autenticado para registrado_por.
     if current_user is not None:
-        registrado_por = current_user.uid
+        registrado_por = current_user.full_name or current_user.email or current_user.uid
 
     try:
         # Validar tipo de geometría
@@ -1409,6 +1420,9 @@ async def get_actividades(
             actividades.append(data)
             last_doc_id = doc.id
 
+        # Ordenar por marca_temporal descendente (más reciente primero)
+        actividades.sort(key=lambda a: a.get("marca_temporal", ""), reverse=True)
+
         # next_cursor solo si hubo resultados iguales al limit (puede haber más)
         next_cursor = last_doc_id if len(actividades) == limit else None
 
@@ -1541,6 +1555,20 @@ async def convocar_actividad(
             send_activity_confirmation_email(body.email, actividad_data)
         except Exception as e:
             logger.warning(f"[GMAIL] Error enviando confirmación: {e}")
+
+        # Notificar a todos los líderes de grupos para asignar personal
+        try:
+            app_url = os.getenv('FRONTEND_URL', 'https://dagma-360-capture.vercel.app')
+            grupos_docs = db.collection("grupos").stream()
+            for gdoc in grupos_docs:
+                gdata = gdoc.to_dict() or {}
+                lider = gdata.get("lider") or {}
+                lider_email = lider.get("email") or gdata.get("email") or ""
+                lider_nombre = lider.get("nombre") or gdata.get("nombre") or ""
+                if lider_email and "@" in lider_email:
+                    send_leaders_notification_email(lider_email, lider_nombre, actividad_data, app_url)
+        except Exception as e:
+            logger.warning(f"[GMAIL] Error enviando notificaciones a líderes: {e}")
 
         return ConvocarActividadResponse(
             success=True,

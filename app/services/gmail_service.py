@@ -245,6 +245,70 @@ def send_assignment_notification_email(
         return False
 
 
+def send_leaders_notification_email(
+    leader_email: str,
+    leader_name: str,
+    actividad_data: dict,
+    app_url: str = "https://dagma-360-capture.vercel.app",
+) -> bool:
+    """
+    Notifica a un líder de grupo sobre una nueva actividad programada, solicitando asignación de personal.
+    Retorna True si se envió correctamente, False en caso de error (no propaga excepciones).
+    """
+    try:
+        fecha = actividad_data.get('fecha_actividad', '')
+        grupos = ', '.join(actividad_data.get('grupos_requeridos') or []) or 'Todos los grupos'
+        saludo = f"Estimado/a líder {leader_name}" if leader_name else "Estimado/a líder"
+
+        html = f"""
+        <html><body style="font-family:Arial,sans-serif;color:#333;max-width:620px;margin:auto;padding:0;">
+          <div style="background:#1b5e20;padding:24px;text-align:center;">
+            <h2 style="color:white;margin:0;">DAGMA — Nueva Actividad Programada</h2>
+            <p style="color:#a5d6a7;margin:8px 0 0;">Se requiere asignación de personal</p>
+          </div>
+          <div style="padding:28px;">
+            <p>{saludo},</p>
+            <p>Se ha programado una nueva actividad ambiental en el sistema
+               <strong>Artefacto 360 DAGMA</strong> que requiere su atención.</p>
+            <p><strong>Grupos requeridos:</strong> {grupos}</p>
+            <p>Por favor, ingrese a la aplicación y asigne el personal disponible de su grupo
+               para participar en esta actividad.</p>
+            <h3 style="color:#1b5e20;margin-bottom:8px;">Detalles de la Actividad</h3>
+            {_activity_details_table(actividad_data)}
+            {_calendar_button(actividad_data)}
+            {_maps_button(actividad_data)}
+            <p style="margin-top:24px;text-align:center;">
+              <a href="{app_url}" style="background:#2e7d32;color:white;padding:12px 32px;
+                 text-decoration:none;border-radius:4px;font-family:Arial,sans-serif;font-size:15px;
+                 font-weight:bold;display:inline-block;">
+                Ir a la App — Asignar Personal
+              </a>
+            </p>
+            <p style="font-size:13px;color:#666;margin-top:16px;">
+              Si tiene dudas, comuníquese con el coordinador:<br>
+              <strong>{actividad_data.get('lider_actividad', 'N/A')}</strong>
+              — Tel: <strong>{actividad_data.get('telefono', 'N/A')}</strong>
+            </p>
+            <hr style="border:none;border-top:1px solid #eee;margin:28px 0;">
+            <p style="font-size:12px;color:#888;margin:0;">
+              Mensaje generado automáticamente por el sistema Artefacto 360 DAGMA.<br>
+              DAGMA — Departamento Administrativo de Gestión del Medio Ambiente, Santiago de Cali.
+            </p>
+          </div>
+        </body></html>
+        """
+        ics = generate_ics(actividad_data)
+        return _send_email(
+            to=leader_email,
+            subject=f"Nueva Actividad DAGMA — Asignar Personal — {fecha}",
+            html_body=html,
+            ics_bytes=ics or None,
+        )
+    except Exception as e:
+        logger.error(f"[GMAIL] Error enviando notificación a líder {leader_email}: {e}")
+        return False
+
+
 def send_removal_notification_email(
     person_email: str,
     nombre: str,
