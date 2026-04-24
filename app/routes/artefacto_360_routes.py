@@ -178,11 +178,14 @@ async def upload_photos_to_s3(photos: List[UploadFile], grupo: str, reporte_id: 
         if s3_client:
             try:
                 photo_content = await photo.read()
-                s3_client.upload_fileobj(
+                content_type = photo.content_type or "application/octet-stream"
+                # Ejecutar upload S3 (síncrono) en thread para no bloquear el event loop
+                await asyncio.to_thread(
+                    s3_client.upload_fileobj,
                     io.BytesIO(photo_content),
                     bucket_name,
                     s3_key,
-                    ExtraArgs={'ContentType': photo.content_type}
+                    {"ContentType": content_type},
                 )
                 doc_meta = {
                     "filename": photo.filename,
@@ -2425,6 +2428,107 @@ async def get_asistencia_actividades(
         raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error consultando asistencia: {str(e)}")
+
+
+@router.get(
+    "/asistencias_resumen",
+    summary="🔵 GET | Listar Resúmenes de Asistencia",
+    tags=["Artefacto de Captura DAGMA"],
+)
+async def get_asistencias_resumen(
+    grupo: Optional[str] = Query(None, description="Filtrar por nombre de grupo"),
+    current_user: CurrentUser = Depends(require_min_role(Role.LIDER)),
+):
+    """
+    Retorna el resumen de todos los registros de asistencia.
+    Cada item incluye métricas calculadas, lista de grupos participantes y conteo de alertas.
+    Opcionalmente filtra por grupo.
+    """
+    try:
+        tz_col = pytz.timezone("America/Bogota")
+        docs = db.collection("asistencia_actividades").stream()
+        resultado = []
+        for doc in docs:
+            data = doc.to_dict()
+            if not data:
+                continue
+            personal_list = data.get("personal_asignado", [])
+
+            # Filtro por grupo (si se especifica)
+            if grupo:
+                tiene_grupo = any(
+                    (p.get("grupo") or "").strip().lower() == grupo.strip().lower()
+                    for p in personal_list
+                )
+                if not tiene_grupo:
+                    continue
+
+            total = len(personal_list)
+            asistentes = sum(1 for p in personal_list if p.get("validacion") is True)
+            ausentes = total - asistentes
+            alertas = sum(1 for p in personal_list if p.get("alerta"))
+            asistencia_general = round((asistentes / total) * 100, 2) if total > 0 else 0.0
+            grupos_participantes = sorted({p.get("grupo", "") for p in personal_list if p.get("grupo")})
+
+            # Personal sin datos personales (sin email, uid)
+            personal_publico = [
+                {
+                    "nombre_completo": p.get("nombre_completo", "—"),
+                    "grupo": p.get("grupo"),
+                    "validacion": p.get("validacion"),
+                    "observacion": p.get("observacion"),
+                    "alerta": p.get("alerta"),
+                }
+                for p in personal_list
+            ]
+
+            # Datos de la actividad desde plan_distrito_verde
+            actividad_info: dict = {}
+            try:
+                act_doc = db.collection("plan_distrito_verde").document(doc.id).get()
+                if act_doc.exists:
+                    act = act_doc.to_dict() or {}
+                    punto = act.get("punto_encuentro") or {}
+                    actividad_info = {
+                        "fecha_actividad": act.get("fecha_actividad"),
+                        "hora_encuentro": act.get("hora_encuentro"),
+                        "tipo_jornada": act.get("tipo_jornada"),
+                        "objetivo_actividad": act.get("objetivo_actividad"),
+                        "estado_actividad": act.get("estado_actividad"),
+                        "direccion": punto.get("direccion"),
+                        "comunas_corregimiento": punto.get("comunas_corregimiento"),
+                        "barrio_vereda": punto.get("barrio_vereda"),
+                    }
+            except Exception:
+                pass  # Si falla la búsqueda del plan, continuar con lo disponible
+
+            resultado.append({
+                "actividad_id": doc.id,
+                "fecha_registro": data.get("ultima_modificacion") or data.get("marca_temporal"),
+                "total_personal": total,
+                "asistentes": asistentes,
+                "ausentes": ausentes,
+                "alertas": alertas,
+                "asistencia_general": asistencia_general,
+                "grupos_participantes": grupos_participantes,
+                "personal_asignado": personal_publico,
+                **actividad_info,
+            })
+
+        # Ordenar por fecha_actividad descendente (o fecha_registro si no hay)
+        resultado.sort(
+            key=lambda x: x.get("fecha_actividad") or x.get("fecha_registro") or "",
+            reverse=True,
+        )
+
+        return {
+            "status": "success",
+            "total": len(resultado),
+            "data": resultado,
+            "timestamp": datetime.now(tz_col).isoformat(),
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error listando asistencias: {str(e)}")
 
 
 @router.patch(
