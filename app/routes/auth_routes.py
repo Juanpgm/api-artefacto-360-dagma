@@ -1,12 +1,15 @@
 ﻿"""
 Rutas de Administración y Control de Accesos
 """
-from fastapi import APIRouter, HTTPException, Depends, Form, Request
+from fastapi import APIRouter, HTTPException, Depends, Form, Request, UploadFile, File
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from pydantic import BaseModel, EmailStr
 from typing import Optional, List
 from datetime import datetime, timezone
 import logging
+import os
+import io
+import asyncio
 from app.firebase_config import auth_client, db
 from app.models.roles import Role, can_assign_role, normalize_role
 from app.deps.authz import get_current_user, require_min_role, CurrentUser
@@ -56,9 +59,54 @@ class ChangeGrupoRequest(BaseModel):
     grupo: str
 
 
+class UpdateProfileRequest(BaseModel):
+    full_name: Optional[str] = None
+    cellphone: Optional[str] = None
+
+
+class SelfUpdateProfileRequest(BaseModel):
+    full_name: Optional[str] = None
+    cellphone: Optional[str] = None
+
+
+class CompleteGoogleProfileRequest(BaseModel):
+    grupo: str
+    full_name: Optional[str] = None
+    cellphone: Optional[str] = None
+
+
 # ---------------------------------------------------------------------------
 # Helpers internos
 # ---------------------------------------------------------------------------
+
+def _get_s3_photo_url(s3_key: str) -> Optional[str]:
+    """
+    Genera una URL pre-firmada de S3 para la foto de perfil (válida 7 días).
+    Retorna None si la configuración de S3 no está disponible.
+    """
+    try:
+        import boto3
+        bucket = os.getenv("S3_BUCKET_NAME") or os.getenv("AWS_S3_BUCKET_NAME")
+        aws_key = os.getenv("AWS_ACCESS_KEY_ID")
+        aws_secret = os.getenv("AWS_SECRET_ACCESS_KEY")
+        aws_region = os.getenv("AWS_REGION", "us-east-1")
+        if not all([bucket, aws_key, aws_secret]):
+            return None
+        s3 = boto3.client(
+            "s3",
+            aws_access_key_id=aws_key,
+            aws_secret_access_key=aws_secret,
+            region_name=aws_region,
+        )
+        return s3.generate_presigned_url(
+            "get_object",
+            Params={"Bucket": bucket, "Key": s3_key},
+            ExpiresIn=604800,  # 7 días
+        )
+    except Exception as e:
+        logger.warning(f"No se pudo generar presigned URL para {s3_key}: {e}")
+        return None
+
 
 def _get_user_firestore_data(uid: str) -> dict:
     doc = db.collection("users").document(uid).get()
@@ -91,6 +139,8 @@ def _sync_claims_if_needed(uid: str, decoded_token: dict, firestore_data: dict) 
 async def validate_session(credentials: HTTPAuthorizationCredentials = Depends(security)):
     """
     Valida el ID token de Firebase y devuelve datos del usuario con role y grupo.
+    Si el usuario no existe en Firestore (primer login con Google), crea el doc
+    y devuelve needs_profile_completion=True para que el frontend recolecte los datos.
     """
     try:
         token = credentials.credentials
@@ -98,15 +148,40 @@ async def validate_session(credentials: HTTPAuthorizationCredentials = Depends(s
         uid = decoded_token["uid"]
         user = auth_client.get_user(uid)
         fs_data = _get_user_firestore_data(uid)
+        is_new_user = not fs_data
+        if is_new_user:
+            # Primer login con Google: crear doc provisional
+            fs_data = {
+                "uid": uid,
+                "email": user.email or "",
+                "full_name": user.display_name or "",
+                "role": Role.OPERADOR,
+                "grupo": None,
+                "needs_review": True,
+                "created_at": datetime.now(timezone.utc),
+            }
+            db.collection("users").document(uid).set(fs_data)
+            auth_client.set_custom_user_claims(uid, {"role": Role.OPERADOR, "grupo": None})
+            logger.info(f"Nuevo usuario Google registrado provisionalmente: {user.email} ({uid})")
         role = fs_data.get("role") or normalize_role(fs_data.get("rol", "")) or Role.OPERADOR
         grupo = fs_data.get("grupo")
+        needs_profile_completion = not grupo
         claims_refreshed = _sync_claims_if_needed(uid, decoded_token, fs_data)
+        # Resolver photoURL: foto personalizada (S3) tiene prioridad sobre Google
+        photo_url = user.photo_url
+        photo_s3_key = fs_data.get("photo_s3_key") if fs_data else None
+        if photo_s3_key:
+            refreshed_url = _get_s3_photo_url(photo_s3_key)
+            if refreshed_url:
+                photo_url = refreshed_url
         return {
             "valid": True,
+            "needs_profile_completion": needs_profile_completion,
             "user": {
                 "uid": user.uid,
                 "email": user.email,
                 "full_name": user.display_name or fs_data.get("full_name", ""),
+                "photoURL": photo_url,
                 "email_verified": user.email_verified,
                 "disabled": user.disabled,
                 "role": role,
@@ -237,6 +312,155 @@ async def change_password(
 @router.get("/auth/workload-identity/status")
 async def get_workload_identity_status():
     return {"workload_identity": "configured", "status": "active", "timestamp": datetime.now(timezone.utc).isoformat()}
+
+
+@router.post("/auth/complete-google-profile")
+async def complete_google_profile(
+    body: CompleteGoogleProfileRequest,
+    current_user: CurrentUser = Depends(get_current_user),
+):
+    """
+    Completa el perfil de un usuario que se registro con Google y no tiene grupo asignado.
+    Solo se permite si grupo es actualmente nulo en Firestore.
+    """
+    uid = current_user.uid
+    fs_data = _get_user_firestore_data(uid)
+    if fs_data.get("grupo"):
+        raise HTTPException(
+            status_code=400,
+            detail="El perfil ya esta completo. Usa /auth/me/profile para actualizar."
+        )
+    if not body.grupo or not body.grupo.strip():
+        raise HTTPException(status_code=400, detail="El campo 'grupo' es obligatorio.")
+    update_data: dict = {
+        "grupo": body.grupo.strip(),
+        "needs_review": False,
+    }
+    if body.full_name and body.full_name.strip():
+        update_data["full_name"] = body.full_name.strip()
+        try:
+            auth_client.update_user(uid, display_name=body.full_name.strip())
+        except Exception as e:
+            logger.warning(f"No se pudo actualizar display_name para {uid}: {e}")
+    if body.cellphone and body.cellphone.strip():
+        update_data["cellphone"] = body.cellphone.strip()
+    db.collection("users").document(uid).update(update_data)
+    auth_client.set_custom_user_claims(uid, {"role": current_user.role, "grupo": body.grupo.strip()})
+    logger.info(f"Perfil Google completado para {uid}: grupo={body.grupo}")
+    return {
+        "success": True,
+        "uid": uid,
+        "grupo": body.grupo.strip(),
+        "updated_fields": list(update_data.keys()),
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+    }
+
+
+@router.patch("/auth/me/profile")
+async def self_update_profile(
+    body: SelfUpdateProfileRequest,
+    current_user: CurrentUser = Depends(get_current_user),
+):
+    """
+    Permite a cualquier usuario autenticado actualizar su propio perfil (full_name, cellphone).
+    No permite cambiar email, role ni grupo.
+    """
+    uid = current_user.uid
+    update_data: dict = {}
+    if body.full_name is not None:
+        update_data["full_name"] = body.full_name
+        try:
+            auth_client.update_user(uid, display_name=body.full_name)
+        except Exception as e:
+            logger.warning(f"No se pudo actualizar display_name en Firebase Auth para {uid}: {e}")
+    if body.cellphone is not None:
+        update_data["cellphone"] = body.cellphone
+    if not update_data:
+        raise HTTPException(status_code=400, detail="No se proporcionaron campos para actualizar.")
+    db.collection("users").document(uid).update(update_data)
+    return {
+        "success": True,
+        "uid": uid,
+        "updated_fields": list(update_data.keys()),
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+    }
+
+
+@router.post("/auth/me/photo")
+async def upload_profile_photo(
+    photo: UploadFile = File(...),
+    current_user: CurrentUser = Depends(get_current_user),
+):
+    """
+    Sube o reemplaza la foto de perfil del usuario autenticado.
+    Almacena en S3 bajo avatars/{uid}/profile.{ext} y actualiza Firebase Auth + Firestore.
+    """
+    import boto3
+    from botocore.exceptions import ClientError
+
+    uid = current_user.uid
+    allowed_types = ["image/jpeg", "image/jpg", "image/png", "image/webp"]
+    if photo.content_type not in allowed_types:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Tipo de imagen no permitido: {photo.content_type}. Usa JPEG, PNG o WebP.",
+        )
+    ext_map = {"image/jpeg": ".jpg", "image/jpg": ".jpg", "image/png": ".png", "image/webp": ".webp"}
+    ext = ext_map.get(photo.content_type, ".jpg")
+    s3_key = f"avatars/{uid}/profile{ext}"
+
+    bucket = os.getenv("S3_BUCKET_NAME") or os.getenv("AWS_S3_BUCKET_NAME")
+    aws_key = os.getenv("AWS_ACCESS_KEY_ID")
+    aws_secret = os.getenv("AWS_SECRET_ACCESS_KEY")
+    aws_region = os.getenv("AWS_REGION", "us-east-1")
+    if not all([bucket, aws_key, aws_secret]):
+        raise HTTPException(status_code=503, detail="Almacenamiento S3 no configurado en este entorno.")
+
+    s3 = boto3.client(
+        "s3",
+        aws_access_key_id=aws_key,
+        aws_secret_access_key=aws_secret,
+        region_name=aws_region,
+    )
+    try:
+        content = await photo.read()
+        if len(content) > 5 * 1024 * 1024:  # 5 MB límite
+            raise HTTPException(status_code=413, detail="La imagen no puede superar 5 MB.")
+        await asyncio.to_thread(
+            s3.upload_fileobj,
+            io.BytesIO(content),
+            bucket,
+            s3_key,
+            {"ContentType": photo.content_type},
+        )
+    except HTTPException:
+        raise
+    except ClientError as e:
+        logger.error(f"Error S3 al subir foto de perfil para {uid}: {e}")
+        raise HTTPException(status_code=500, detail="Error al subir la imagen al almacenamiento.")
+    except Exception as e:
+        logger.error(f"Error inesperado subiendo foto para {uid}: {e}")
+        raise HTTPException(status_code=500, detail="Error interno al procesar la imagen.")
+
+    # Generar presigned URL (7 días)
+    photo_url = _get_s3_photo_url(s3_key)
+    if not photo_url:
+        raise HTTPException(status_code=500, detail="Error al generar URL de la imagen.")
+
+    # Actualizar Firebase Auth
+    try:
+        auth_client.update_user(uid, photo_url=photo_url)
+    except Exception as e:
+        logger.warning(f"No se pudo actualizar photo_url en Firebase Auth para {uid}: {e}")
+
+    # Actualizar Firestore (guardar key para regenerar URL en futuras sesiones)
+    db.collection("users").document(uid).update({
+        "photo_s3_key": s3_key,
+        "photoURL": photo_url,
+    })
+
+    logger.info(f"Foto de perfil actualizada para {uid} → {s3_key}")
+    return {"success": True, "photoURL": photo_url}
 
 
 @router.post("/auth/google")
@@ -380,6 +604,37 @@ async def change_user_grupo(
         "old_grupo": old_grupo,
         "new_grupo": body.grupo,
         "requires_relogin": True,
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+    }
+
+
+@router.patch("/admin/users/{uid}/profile")
+async def update_user_profile(
+    uid: str,
+    body: UpdateProfileRequest,
+    current_user: CurrentUser = Depends(require_min_role(Role.ADMINISTRADOR)),
+):
+    """Actualiza datos de perfil de un usuario (full_name, cellphone). Requiere administrador o superior."""
+    target_doc = db.collection("users").document(uid).get()
+    if not target_doc.exists:
+        raise HTTPException(status_code=404, detail=f"Usuario {uid} no encontrado.")
+    update_data: dict = {}
+    if body.full_name is not None:
+        update_data["full_name"] = body.full_name
+        try:
+            auth_client.update_user(uid, display_name=body.full_name)
+        except Exception as e:
+            logger.warning(f"No se pudo actualizar display_name en Firebase Auth para {uid}: {e}")
+    if body.cellphone is not None:
+        update_data["cellphone"] = body.cellphone
+    if not update_data:
+        raise HTTPException(status_code=400, detail="No se proporcionaron campos para actualizar.")
+    db.collection("users").document(uid).update(update_data)
+    logger.info(f"Perfil actualizado: uid={uid} campos={list(update_data.keys())} por actor={current_user.uid}")
+    return {
+        "success": True,
+        "uid": uid,
+        "updated_fields": list(update_data.keys()),
         "timestamp": datetime.now(timezone.utc).isoformat(),
     }
 
