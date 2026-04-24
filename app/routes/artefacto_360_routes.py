@@ -5,7 +5,7 @@ from fastapi import APIRouter, HTTPException, Form, UploadFile, File, Query, Res
 from typing import List, Optional
 from enum import Enum
 from app.models.roles import Role, CurrentUser
-from app.deps.authz import get_current_user, require_min_role, enforce_group_scope
+from app.deps.authz import get_current_user, require_min_role
 import asyncio
 from datetime import datetime, timedelta, timezone
 import pytz
@@ -487,15 +487,9 @@ async def _post_reporte_intervencion(
     s3_prefix = config["s3_prefix"]
     display_name = config["display_name"]
 
-    # Validar scope de grupo: operador/lider solo puede registrar en su propio grupo
+    # Cualquier usuario autenticado puede registrar intervenciones en cualquier grupo.
+    # Solo se fuerza el registrado_por desde el token para no confiar en el form.
     if current_user is not None:
-        grupo_effectivo = enforce_group_scope(current_user, grupo_key)
-        if grupo_effectivo and grupo_effectivo != grupo_key:
-            raise HTTPException(
-                status_code=403,
-                detail=f"No tienes acceso al grupo '{grupo_key}'. Solo puedes registrar en '{current_user.grupo}'.",
-            )
-        # Forzar registrado_por desde el token (no confiamos en el form)
         registrado_por = current_user.uid
 
     try:
