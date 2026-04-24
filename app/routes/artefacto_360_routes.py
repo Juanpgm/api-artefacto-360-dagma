@@ -178,11 +178,14 @@ async def upload_photos_to_s3(photos: List[UploadFile], grupo: str, reporte_id: 
         if s3_client:
             try:
                 photo_content = await photo.read()
-                s3_client.upload_fileobj(
+                content_type = photo.content_type or "application/octet-stream"
+                # Ejecutar upload S3 (síncrono) en thread para no bloquear el event loop
+                await asyncio.to_thread(
+                    s3_client.upload_fileobj,
                     io.BytesIO(photo_content),
                     bucket_name,
                     s3_key,
-                    ExtraArgs={'ContentType': photo.content_type}
+                    {"ContentType": content_type},
                 )
                 doc_meta = {
                     "filename": photo.filename,
