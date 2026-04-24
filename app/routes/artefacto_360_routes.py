@@ -1391,7 +1391,8 @@ async def get_actividades(
         query = plan_ref
 
         if grupo:
-            query = query.where("grupo", "==", grupo.strip())
+            # Filter by grupos_requeridos array (stores display names like "Cuadrilla", "Vivero", etc.)
+            query = query.where("grupos_requeridos", "array_contains", grupo.strip())
 
         # Paginación cursor-based (Firestore no soporta OFFSET)
         if start_after:
