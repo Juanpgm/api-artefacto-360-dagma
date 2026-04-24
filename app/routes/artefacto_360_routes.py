@@ -3,6 +3,7 @@ Rutas para gestión de Artefacto de Captura DAGMA
 """
 from fastapi import APIRouter, HTTPException, Form, UploadFile, File, Query, Response, Depends, Body
 from typing import List, Optional
+from enum import Enum
 from app.models.roles import Role, CurrentUser
 from app.deps.authz import get_current_user, require_min_role, enforce_group_scope
 import asyncio
@@ -2189,6 +2190,27 @@ async def get_reportes_intervenciones_todos(
 
 # ==================== ASISTENCIA ACTIVIDADES ====================#
 
+class AlertaTipo(str, Enum):
+    """Tipos predefinidos de alerta para ausencias o novedades en actividades"""
+    accidente_laboral        = "accidente_laboral"
+    fuerza_mayor             = "fuerza_mayor"
+    llamado_atencion         = "llamado_atencion"
+    abandono_sin_justif      = "abandono_sin_justificacion"
+    llegada_tarde            = "llegada_tarde"
+    retiro_voluntario        = "retiro_voluntario"
+    otro                     = "otro"
+
+ALERTA_TIPO_LABELS: dict = {
+    "accidente_laboral":        "Accidente Laboral",
+    "fuerza_mayor":             "Retiro por Fuerza Mayor",
+    "llamado_atencion":         "Llamado de Atención",
+    "abandono_sin_justificacion": "Abandono sin Justificación",
+    "llegada_tarde":            "Llegada Tarde",
+    "retiro_voluntario":        "Retiro Voluntario",
+    "otro":                     "Otro",
+}
+
+
 class AsistenciaPersonaItem(BaseModel):
     """Registro de asistencia por persona en una actividad"""
     nombre_completo: str = Field(..., min_length=1, description="Nombre completo del integrante")
@@ -2197,7 +2219,7 @@ class AsistenciaPersonaItem(BaseModel):
     grupo: Optional[str] = Field(None, description="Grupo operativo al que pertenece")
     validacion: bool = Field(..., description="true = asistio, false = no asistio")
     observacion: Optional[str] = Field(None, description="Observacion libre sobre la asistencia")
-    alerta: Optional[str] = Field(None, description="Alerta o novedad relacionada con la asistencia")
+    alerta: Optional[AlertaTipo] = Field(None, description="Tipo de alerta o novedad (solo para ausentes)")
 
 
 class AsistenciaActividadRequest(BaseModel):
@@ -2214,7 +2236,7 @@ class AsistenciaPatchPersonaItem(BaseModel):
     email: str = Field(..., min_length=1, description="Email del integrante (clave de busqueda)")
     validacion: Optional[bool] = Field(None, description="true = asistio, false = no asistio")
     observacion: Optional[str] = Field(None, description="Observacion libre sobre la asistencia")
-    alerta: Optional[str] = Field(None, description="Alerta o novedad relacionada con la asistencia")
+    alerta: Optional[AlertaTipo] = Field(None, description="Tipo de alerta o novedad (solo para ausentes)")
 
 
 class AsistenciaActividadPatchRequest(BaseModel):
@@ -2222,6 +2244,22 @@ class AsistenciaActividadPatchRequest(BaseModel):
     personal: List[AsistenciaPatchPersonaItem] = Field(
         ..., min_length=1, description="Lista de personas con los campos a actualizar (solo los campos enviados se modifican)"
     )
+
+
+@router.get(
+    "/alertas_tipos",
+    summary="📋 GET | Catálogo de tipos de alerta para asistencia",
+    tags=["Artefacto de Captura DAGMA"],
+)
+async def get_alertas_tipos():
+    """
+    Retorna el catálogo de tipos de alerta predefinidos para usar en el registro de asistencia.
+    No requiere autenticación.
+    """
+    return [
+        {"value": tipo.value, "label": ALERTA_TIPO_LABELS[tipo.value]}
+        for tipo in AlertaTipo
+    ]
 
 
 @router.post(
