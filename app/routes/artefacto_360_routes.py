@@ -2427,6 +2427,72 @@ async def get_asistencia_actividades(
         raise HTTPException(status_code=500, detail=f"Error consultando asistencia: {str(e)}")
 
 
+@router.get(
+    "/asistencias_resumen",
+    summary="🔵 GET | Listar Resúmenes de Asistencia",
+    tags=["Artefacto de Captura DAGMA"],
+)
+async def get_asistencias_resumen(
+    grupo: Optional[str] = Query(None, description="Filtrar por nombre de grupo"),
+    current_user: CurrentUser = Depends(require_min_role(Role.LIDER)),
+):
+    """
+    Retorna el resumen de todos los registros de asistencia.
+    Cada item incluye métricas calculadas, lista de grupos participantes y conteo de alertas.
+    Opcionalmente filtra por grupo.
+    """
+    try:
+        tz_col = pytz.timezone("America/Bogota")
+        docs = db.collection("asistencia_actividades").stream()
+        resultado = []
+        for doc in docs:
+            data = doc.to_dict()
+            if not data:
+                continue
+            personal_list = data.get("personal_asignado", [])
+
+            # Filtro por grupo (si se especifica)
+            if grupo:
+                tiene_grupo = any(
+                    (p.get("grupo") or "").strip().lower() == grupo.strip().lower()
+                    for p in personal_list
+                )
+                if not tiene_grupo:
+                    continue
+
+            total = len(personal_list)
+            asistentes = sum(1 for p in personal_list if p.get("validacion") is True)
+            ausentes = total - asistentes
+            alertas = sum(1 for p in personal_list if p.get("alerta"))
+            asistencia_general = round((asistentes / total) * 100, 2) if total > 0 else 0.0
+            grupos_participantes = sorted({p.get("grupo", "") for p in personal_list if p.get("grupo")})
+
+            resultado.append({
+                "actividad_id": doc.id,
+                "fecha_registro": data.get("ultima_modificacion") or data.get("marca_temporal"),
+                "registrado_por": data.get("registrado_por"),
+                "total_personal": total,
+                "asistentes": asistentes,
+                "ausentes": ausentes,
+                "alertas": alertas,
+                "asistencia_general": asistencia_general,
+                "grupos_participantes": grupos_participantes,
+                "personal_asignado": personal_list,
+            })
+
+        # Ordenar por fecha descendente
+        resultado.sort(key=lambda x: x.get("fecha_registro") or "", reverse=True)
+
+        return {
+            "status": "success",
+            "total": len(resultado),
+            "data": resultado,
+            "timestamp": datetime.now(tz_col).isoformat(),
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error listando asistencias: {str(e)}")
+
+
 @router.patch(
     "/asistencia_actividades/{actividad_id}",
     summary="🟡 PATCH | Actualizar Asistencia de Integrante",
