@@ -363,6 +363,7 @@ class ReconocimientoResponse(BaseModel):
     photos_uploaded: Optional[int] = None
     documentos_con_enlaces: Optional[List[dict]] = None
     timestamp: str
+    numero_registro: Optional[int] = None
 
 
 # ==================== CONFIGURACIÓN DE GRUPOS OPERATIVOS ====================#
@@ -578,8 +579,10 @@ async def _post_reporte_intervencion(
         # Obtener número de registro secuencial y permanente
         try:
             numero_registro = await asyncio.to_thread(_get_next_numero_registro)
+            if numero_registro is None:
+                logger.warning("[COUNTER] _get_next_numero_registro() returned None")
         except Exception as e:
-            logger.warning(f"[COUNTER] Error getting numero_registro: {e}")
+            logger.warning(f"[COUNTER] Error getting numero_registro: {e}", exc_info=True)
             numero_registro = None
 
         # Timestamp con zona horaria de Colombia
@@ -713,7 +716,8 @@ async def _post_reporte_intervencion(
             photosUrl=photos_urls,
             photos_uploaded=len(documentos),
             documentos_con_enlaces=docs_enriquecidos,
-            timestamp=timestamp
+            timestamp=timestamp,
+            numero_registro=numero_registro,
         )
 
     except HTTPException:
