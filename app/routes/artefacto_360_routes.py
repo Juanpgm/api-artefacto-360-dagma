@@ -24,6 +24,10 @@ from app.models.validation import CoordinatesModel, ArbolesDataModel
 
 # Importar configuración de Firebase y S3/Storage
 from app.firebase_config import db
+try:
+    from google.cloud.firestore_v1.transaction import transactional as _fs_transactional
+except ImportError:
+    _fs_transactional = None
 import boto3
 from botocore.exceptions import ClientError
 
@@ -319,7 +323,7 @@ def convertir_photosUrl_a_documentos(photos_urls: list, s3_client, bucket_name: 
 
 def enriquecer_reportes_con_enlaces(reportes: list, s3_client, bucket_name: str) -> list:
     """
-    Enriquece lista de reportes con documentos_con_enlaces.
+    Enriquece lista de reportes con documentos_con_enlaces y photosUrl (presigned).
     Maneja tanto formato nuevo (documentos) como legacy (photosUrl).
     """
     for reporte in reportes:
@@ -329,12 +333,20 @@ def enriquecer_reportes_con_enlaces(reportes: list, s3_client, bucket_name: str)
                 reporte["photosUrl"], s3_client, bucket_name
             )
         if reporte.get("documentos"):
-            reporte["documentos_con_enlaces"] = generar_documentos_con_enlaces(
+            docs_enriquecidos = generar_documentos_con_enlaces(
                 reporte["documentos"], s3_client, bucket_name
             )
+            reporte["documentos_con_enlaces"] = docs_enriquecidos
             reporte["total_documentos"] = len(reporte["documentos"])
+            # Poblar photosUrl con URLs presigned para compatibilidad con slim mode
+            reporte["photosUrl"] = [
+                d.get("url_visualizar") or d.get("url_presigned") or d.get("s3_url") or ""
+                for d in docs_enriquecidos
+                if d.get("url_visualizar") or d.get("url_presigned") or d.get("s3_url")
+            ]
         else:
             reporte["documentos_con_enlaces"] = []
+            reporte["photosUrl"] = []
             reporte["total_documentos"] = 0
     return reportes
 
@@ -358,6 +370,31 @@ class ReconocimientoResponse(BaseModel):
 # Colección única para todos los reportes de intervención de todos los grupos.
 # El campo "grupo" dentro de cada documento es el discriminador.
 COLLECTION_REPORTES_INTERVENCIONES = "reportes_intervenciones"
+COLLECTION_COUNTERS = "counters"
+_COUNTER_DOC_REPORTES = "reportes_intervenciones"
+
+
+def _get_next_numero_registro() -> int:
+    """Lee e incrementa el contador global de reportes de intervención de forma síncrona."""
+    counter_ref = db.collection(COLLECTION_COUNTERS).document(_COUNTER_DOC_REPORTES)
+    try:
+        if _fs_transactional is not None:
+            @_fs_transactional
+            def _increment(transaction, ref):
+                snap = ref.get(transaction=transaction)
+                n = ((snap.to_dict() or {}).get("total", 0)) + 1
+                transaction.set(ref, {"total": n}, merge=True)
+                return n
+            return _increment(db.transaction(), counter_ref)
+        else:
+            # Fallback sin transacción (baja probabilidad de colisión en este sistema)
+            snap = counter_ref.get()
+            n = ((snap.to_dict() or {}).get("total", 0)) + 1
+            counter_ref.set({"total": n}, merge=True)
+            return n
+    except Exception as e:
+        logger.warning(f"[COUNTER] Error incrementing numero_registro: {e}")
+        return None
 
 GRUPOS_CONFIG = {
     "cuadrilla": {
@@ -538,6 +575,13 @@ async def _post_reporte_intervencion(
         # Generar ID único para el reporte
         reporte_id = str(uuid.uuid4())
 
+        # Obtener número de registro secuencial y permanente
+        try:
+            numero_registro = await asyncio.to_thread(_get_next_numero_registro)
+        except Exception as e:
+            logger.warning(f"[COUNTER] Error getting numero_registro: {e}")
+            numero_registro = None
+
         # Timestamp con zona horaria de Colombia
         tz_col = pytz.timezone("America/Bogota")
         timestamp = datetime.now(tz_col).isoformat()
@@ -619,6 +663,7 @@ async def _post_reporte_intervencion(
         # Preparar datos comunes para guardar en Firebase
         reporte_data = {
             "id": reporte_id,
+            "numero_registro": numero_registro,
             "tipo_intervencion": tipo_intervencion,
             "descripcion_intervencion": descripcion_intervencion,
             "direccion": direccion,
@@ -2076,6 +2121,7 @@ _SLIM_FIELDS = frozenset({
     "id", "timestamp", "grupo", "tipo_intervencion", "barrio_vereda",
     "comuna_corregimiento", "descripcion_intervencion", "photosUrl",
     "registrado_por", "direccion", "photos_uploaded", "documentos_con_enlaces",
+    "numero_registro",
 })
 
 
