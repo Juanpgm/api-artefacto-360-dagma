@@ -1,10 +1,13 @@
 """
 Servicio de notificaciones por email para actividades DAGMA.
-Usa Gmail API (HTTPS) — funciona en Railway sin requerir puertos SMTP.
-Requiere variables: GMAIL_CLIENT_ID, GMAIL_CLIENT_SECRET, GMAIL_REFRESH_TOKEN, GMAIL_SENDER.
+Estrategia dual:
+  1. Gmail API (OAuth2): requiere GMAIL_CLIENT_ID, GMAIL_CLIENT_SECRET, GMAIL_REFRESH_TOKEN, GMAIL_SENDER.
+  2. SMTP (fallback): requiere SMTP_HOST, SMTP_PORT, SMTP_USER, SMTP_PASSWORD, SMTP_SENDER_NAME.
+Si ninguno está configurado, el envío falla silenciosamente con un log de advertencia.
 """
 import os
 import base64
+import smtplib
 import logging
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
@@ -43,42 +46,96 @@ def _get_gmail_service():
     return build('gmail', 'v1', credentials=creds, cache_discovery=False)
 
 
-def _send_email(to: str, subject: str, html_body: str, ics_bytes: bytes = None) -> bool:
-    """Envía un correo vía Gmail API con adjunto iCal opcional. Retorna True si tuvo éxito."""
-    sender = os.getenv('GMAIL_SENDER', '')
-    sender_name = os.getenv('SMTP_SENDER_NAME', 'DAGMA Artefacto 360')
+def _build_mime_message(sender: str, sender_name: str, to: str, subject: str,
+                        html_body: str, ics_bytes: bytes = None) -> MIMEMultipart:
+    """Construye el objeto MIMEMultipart listo para enviar (compartido por Gmail API y SMTP)."""
+    msg = MIMEMultipart('mixed')
+    msg['From'] = f"{sender_name} <{sender}>"
+    msg['To'] = to
+    msg['Subject'] = subject
+    msg.attach(MIMEText(html_body, 'html', 'utf-8'))
+    if ics_bytes:
+        part = MIMEBase('text', 'calendar', method='REQUEST', charset='utf-8')
+        part.set_payload(ics_bytes)
+        encoders.encode_base64(part)
+        part.add_header('Content-Disposition', 'attachment', filename='actividad_dagma.ics')
+        part.add_header('Content-Type', 'text/calendar; method=REQUEST; charset=utf-8')
+        msg.attach(part)
+    return msg
 
+
+def _send_via_gmail_api(msg: MIMEMultipart, to: str) -> bool:
+    """Intenta enviar usando Gmail API (OAuth2). Retorna True si tuvo éxito."""
     try:
         service = _get_gmail_service()
         if service is None:
             return False
-
-        msg = MIMEMultipart('mixed')
-        msg['From'] = f"{sender_name} <{sender}>"
-        msg['To'] = to
-        msg['Subject'] = subject
-
-        msg.attach(MIMEText(html_body, 'html', 'utf-8'))
-
-        if ics_bytes:
-            part = MIMEBase('text', 'calendar', method='REQUEST', charset='utf-8')
-            part.set_payload(ics_bytes)
-            encoders.encode_base64(part)
-            part.add_header('Content-Disposition', 'attachment', filename='actividad_dagma.ics')
-            part.add_header('Content-Type', 'text/calendar; method=REQUEST; charset=utf-8')
-            msg.attach(part)
-
         raw = base64.urlsafe_b64encode(msg.as_bytes()).decode('utf-8')
         service.users().messages().send(userId='me', body={'raw': raw}).execute()
-
-        logger.info(f"[GMAIL] Email enviado a {to}")
+        logger.info(f"[GMAIL-API] Email enviado a {to}")
         return True
-
     except HttpError as e:
-        logger.error(f"[GMAIL] HttpError enviando a {to}: {e}")
+        logger.error(f"[GMAIL-API] HttpError enviando a {to}: {e}")
         return False
     except Exception as e:
-        logger.error(f"[GMAIL] Error enviando a {to}: {e}")
+        logger.error(f"[GMAIL-API] Error enviando a {to}: {e}")
+        return False
+
+
+def _send_via_smtp(msg: MIMEMultipart, to: str) -> bool:
+    """Intenta enviar usando SMTP (App Password). Retorna True si tuvo éxito."""
+    smtp_host = os.getenv('SMTP_HOST', '')
+    smtp_port = int(os.getenv('SMTP_PORT', '587'))
+    smtp_user = os.getenv('SMTP_USER', '')
+    smtp_password = os.getenv('SMTP_PASSWORD', '')
+
+    if not (smtp_host and smtp_user and smtp_password):
+        logger.warning("[SMTP] SMTP_HOST, SMTP_USER o SMTP_PASSWORD no configurados")
+        return False
+
+    try:
+        with smtplib.SMTP(smtp_host, smtp_port, timeout=20) as server:
+            server.ehlo()
+            server.starttls()
+            server.login(smtp_user, smtp_password)
+            server.sendmail(smtp_user, [to], msg.as_string())
+        logger.info(f"[SMTP] Email enviado a {to}")
+        return True
+    except Exception as e:
+        logger.error(f"[SMTP] Error enviando a {to}: {e}")
+        return False
+
+
+def _send_email(to: str, subject: str, html_body: str, ics_bytes: bytes = None) -> bool:
+    """
+    Envía un correo con adjunto iCal opcional.
+    Intenta primero Gmail API (OAuth2); si no está configurada, usa SMTP como fallback.
+    Retorna True si tuvo éxito, False en caso contrario (nunca propaga excepciones).
+    """
+    sender_name = os.getenv('SMTP_SENDER_NAME', 'DAGMA Artefacto 360')
+    # Gmail API usa GMAIL_SENDER; SMTP usa SMTP_USER como remitente
+    sender = os.getenv('GMAIL_SENDER') or os.getenv('SMTP_USER', '')
+
+    try:
+        msg = _build_mime_message(sender, sender_name, to, subject, html_body, ics_bytes)
+
+        # Intentar Gmail API primero
+        gmail_configured = bool(
+            os.getenv('GMAIL_CLIENT_ID') and
+            os.getenv('GMAIL_CLIENT_SECRET') and
+            os.getenv('GMAIL_REFRESH_TOKEN')
+        )
+        if gmail_configured:
+            result = _send_via_gmail_api(msg, to)
+            if result:
+                return True
+            logger.warning(f"[EMAIL] Gmail API falló para {to}, intentando SMTP...")
+
+        # Fallback: SMTP
+        return _send_via_smtp(msg, to)
+
+    except Exception as e:
+        logger.error(f"[EMAIL] Error inesperado enviando a {to}: {e}")
         return False
 
 
