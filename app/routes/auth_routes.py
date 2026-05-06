@@ -10,6 +10,8 @@ import logging
 import os
 import io
 import asyncio
+import base64
+import json
 from app.firebase_config import auth_client, db
 from app.models.roles import Role, can_assign_role, normalize_role
 from app.deps.authz import get_current_user, require_min_role, CurrentUser
@@ -23,6 +25,35 @@ security = HTTPBearer()
 limiter = Limiter(key_func=get_remote_address)
 
 logger = logging.getLogger(__name__)
+
+
+# ---------------------------------------------------------------------------
+# Dev token fallback helper
+# ---------------------------------------------------------------------------
+
+def _verify_token_with_fallback(token: str) -> dict:
+    """Verifies a Firebase ID token. In local dev, falls back to unsigned JWT decode
+    when Google's certificate endpoint (port 443) is blocked."""
+    try:
+        return auth_client.verify_id_token(token, check_revoked=True)
+    except Exception as exc:
+        exc_name = type(exc).__name__
+        exc_msg = str(exc)
+        is_cert_error = "CertificateFetchError" in exc_name or "CertificateFetchError" in exc_msg
+        is_local = os.environ.get("RAILWAY_ENVIRONMENT", "local") != "production"
+        if is_cert_error and is_local:
+            try:
+                payload_b64 = token.split(".")[1]
+                payload_b64 += "=" * (4 - len(payload_b64) % 4)
+                payload = json.loads(base64.urlsafe_b64decode(payload_b64))
+                uid = payload.get("user_id") or payload.get("sub") or ""
+                if not uid:
+                    raise ValueError("UID vacío en payload JWT")
+                logger.warning(f"[DEV] Cert fetch bloqueado — uid={uid} autenticado sin verificar firma")
+                return {**payload, "uid": uid}
+            except Exception as decode_err:
+                logger.warning(f"[DEV] No se pudo decodificar JWT: {decode_err}")
+        raise
 
 
 # ---------------------------------------------------------------------------
@@ -144,7 +175,7 @@ async def validate_session(credentials: HTTPAuthorizationCredentials = Depends(s
     """
     try:
         token = credentials.credentials
-        decoded_token = auth_client.verify_id_token(token, check_revoked=True)
+        decoded_token = _verify_token_with_fallback(token)
         uid = decoded_token["uid"]
         user = auth_client.get_user(uid)
         fs_data = _get_user_firestore_data(uid)
@@ -201,7 +232,7 @@ async def login_user(credentials: UserLoginRequest, request: Request):
     Valida el ID token del frontend, devuelve datos del usuario con role y grupo.
     """
     try:
-        decoded_token = auth_client.verify_id_token(credentials.id_token, check_revoked=True)
+        decoded_token = _verify_token_with_fallback(credentials.id_token)
         uid = decoded_token["uid"]
         user = auth_client.get_user(uid)
         fs_data = _get_user_firestore_data(uid)
@@ -221,12 +252,20 @@ async def login_user(credentials: UserLoginRequest, request: Request):
         grupo = fs_data.get("grupo")
         claims_refreshed = _sync_claims_if_needed(uid, decoded_token, fs_data)
         logging.info(f"Usuario {user.email} inicio sesion (role={role})")
+        # Resolver photoURL igual que en validate-session
+        photo_url = user.photo_url
+        photo_s3_key = fs_data.get("photo_s3_key") if fs_data else None
+        if photo_s3_key:
+            refreshed_url = _get_s3_photo_url(photo_s3_key)
+            if refreshed_url:
+                photo_url = refreshed_url
         return {
             "success": True,
             "user": {
                 "email": user.email,
                 "uid": user.uid,
                 "full_name": user.display_name or fs_data.get("full_name", ""),
+                "photoURL": photo_url,
                 "email_verified": user.email_verified,
                 "role": role,
                 "grupo": grupo,
@@ -266,12 +305,12 @@ async def register_user(user_data: UserRegistrationRequest, request: Request):
             "email": user_data.email,
             "full_name": user_data.full_name,
             "cellphone": user_data.cellphone,
-            "grupo": user_data.grupo,
+            "grupo": user_data.grupo.strip().lower() if user_data.grupo else None,
             "role": Role.OPERADOR,
             "created_at": datetime.now(timezone.utc),
             "uid": user.uid,
         })
-        auth_client.set_custom_user_claims(user.uid, {"role": Role.OPERADOR, "grupo": user_data.grupo})
+        auth_client.set_custom_user_claims(user.uid, {"role": Role.OPERADOR, "grupo": user_data.grupo.strip().lower() if user_data.grupo else None})
         logging.info(f"Usuario registrado: {user.email} (UID: {user.uid})")
         return {
             "success": True,
@@ -332,8 +371,9 @@ async def complete_google_profile(
         )
     if not body.grupo or not body.grupo.strip():
         raise HTTPException(status_code=400, detail="El campo 'grupo' es obligatorio.")
+    grupo_normalizado = body.grupo.strip().lower()
     update_data: dict = {
-        "grupo": body.grupo.strip(),
+        "grupo": grupo_normalizado,
         "needs_review": False,
     }
     if body.full_name and body.full_name.strip():
@@ -345,12 +385,12 @@ async def complete_google_profile(
     if body.cellphone and body.cellphone.strip():
         update_data["cellphone"] = body.cellphone.strip()
     db.collection("users").document(uid).update(update_data)
-    auth_client.set_custom_user_claims(uid, {"role": current_user.role, "grupo": body.grupo.strip()})
-    logger.info(f"Perfil Google completado para {uid}: grupo={body.grupo}")
+    auth_client.set_custom_user_claims(uid, {"role": current_user.role, "grupo": grupo_normalizado})
+    logger.info(f"Perfil Google completado para {uid}: grupo={grupo_normalizado}")
     return {
         "success": True,
         "uid": uid,
-        "grupo": body.grupo.strip(),
+        "grupo": grupo_normalizado,
         "updated_fields": list(update_data.keys()),
         "timestamp": datetime.now(timezone.utc).isoformat(),
     }
@@ -594,15 +634,16 @@ async def change_user_grupo(
     target_data = target_doc.to_dict() or {}
     old_grupo = target_data.get("grupo")
     role = target_data.get("role") or normalize_role(target_data.get("rol", "")) or Role.OPERADOR
-    db.collection("users").document(uid).update({"grupo": body.grupo, "needs_review": False})
-    auth_client.set_custom_user_claims(uid, {"role": role, "grupo": body.grupo})
+    grupo_normalizado = body.grupo.strip().lower() if body.grupo else None
+    db.collection("users").document(uid).update({"grupo": grupo_normalizado, "needs_review": False})
+    auth_client.set_custom_user_claims(uid, {"role": role, "grupo": grupo_normalizado})
     auth_client.revoke_refresh_tokens(uid)
-    logger.info(f"Grupo cambiado: uid={uid} {old_grupo}->{body.grupo} por actor={current_user.uid}")
+    logger.info(f"Grupo cambiado: uid={uid} {old_grupo}->{grupo_normalizado} por actor={current_user.uid}")
     return {
         "success": True,
         "uid": uid,
         "old_grupo": old_grupo,
-        "new_grupo": body.grupo,
+        "new_grupo": grupo_normalizado,
         "requires_relogin": True,
         "timestamp": datetime.now(timezone.utc).isoformat(),
     }

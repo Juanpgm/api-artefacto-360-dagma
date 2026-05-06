@@ -1316,6 +1316,52 @@ async def get_grupos(
         )
 
 
+# ==================== ENDPOINT: Crear Grupo ======================================#
+@router.post(
+    "/grupos",
+    summary="🟢 POST | Crear Grupo",
+    tags=["Artefacto de Captura DAGMA"],
+)
+async def crear_grupo(
+    body: dict = Body(...),
+    current_user: CurrentUser = Depends(require_min_role(Role.ADMINISTRADOR)),
+):
+    """
+    Crear un nuevo grupo operativo en la colección `grupos`.
+    Requiere rol mínimo ADMINISTRADOR.
+    """
+    nombre = (body.get("nombre") or "").strip()
+    if not nombre:
+        raise HTTPException(status_code=422, detail="El campo 'nombre' es requerido")
+
+    # Doc ID normalizado (igual que init_grupos_collection.py)
+    doc_id = nombre.lower().replace(" ", "_")
+    ahora = datetime.now(pytz.timezone("America/Bogota")).isoformat()
+
+    lider_nombre = (body.get("lider") or "").strip() or None
+    lider_telefono = (body.get("telefono_contacto") or "").strip() or None
+
+    doc_data = {
+        "nombre": nombre,
+        "email": (body.get("email") or "").strip() or None,
+        "lider": {
+            "nombre": lider_nombre,
+            "email": None,
+            "numero_contacto": lider_telefono,
+        },
+        "creado_por": current_user.email,
+        "timestamp": ahora,
+    }
+
+    db.collection("grupos").document(doc_id).set(doc_data)
+
+    return {
+        "status": "success",
+        "data": doc_data,
+        "timestamp": ahora,
+    }
+
+
 # ==================== ENDPOINT 5: Obtener Actividades ======================================#
 @router.get(
     "/actividades",
