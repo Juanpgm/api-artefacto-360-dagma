@@ -3,7 +3,9 @@ API Artefacto 360 DAGMA - Main Application
 Configuración basada en gestor_proyecto_api
 """
 import logging
-from fastapi import FastAPI
+import os
+import time
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.gzip import GZipMiddleware
 from fastapi.responses import JSONResponse
@@ -13,8 +15,9 @@ from slowapi.errors import RateLimitExceeded
 from slowapi.middleware import SlowAPIMiddleware
 
 # Configurar logging de auditoría
+_LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO").upper()
 logging.basicConfig(
-    level=logging.INFO,
+    level=getattr(logging, _LOG_LEVEL, logging.INFO),
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     handlers=[
         logging.FileHandler('audit.log'),
@@ -22,6 +25,8 @@ logging.basicConfig(
     ]
 )
 logger = logging.getLogger(__name__)
+_perf_logger = logging.getLogger("dagma.perf")
+_SLOW_REQUEST_MS = float(os.getenv("SLOW_REQUEST_MS", "1000"))
 
 # Importar configuración de Firebase
 from app.firebase_config import db, auth_client
@@ -56,6 +61,21 @@ app.add_middleware(SlowAPIMiddleware)
 
 # GZip: comprime respuestas JSON >= 1KB (~70% menos payload)
 app.add_middleware(GZipMiddleware, minimum_size=1000)
+
+
+# Middleware de tiempos: agrega header X-Process-Time y loguea lentos
+@app.middleware("http")
+async def _timing_middleware(request: Request, call_next):
+    start = time.perf_counter()
+    response = await call_next(request)
+    elapsed_ms = (time.perf_counter() - start) * 1000.0
+    response.headers["X-Process-Time"] = f"{elapsed_ms:.1f}"
+    if elapsed_ms >= _SLOW_REQUEST_MS:
+        _perf_logger.warning(
+            "slow_request method=%s path=%s status=%s elapsed_ms=%.1f",
+            request.method, request.url.path, response.status_code, elapsed_ms,
+        )
+    return response
 
 # Configurar CORS
 app.add_middleware(

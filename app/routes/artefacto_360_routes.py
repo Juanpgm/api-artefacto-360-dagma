@@ -1,7 +1,7 @@
 """
 Rutas para gestión de Artefacto de Captura DAGMA
 """
-from fastapi import APIRouter, HTTPException, Form, UploadFile, File, Query, Response, Depends, Body
+from fastapi import APIRouter, HTTPException, Form, UploadFile, File, Query, Response, Depends, Body, BackgroundTasks
 from typing import List, Optional
 from enum import Enum
 from app.models.roles import Role, CurrentUser
@@ -21,6 +21,7 @@ import logging
 
 from pydantic import BaseModel, Field
 from app.models.validation import CoordinatesModel, ArbolesDataModel
+from app.utils.firestore_async import run_blocking, stream_to_list
 
 # Importar configuración de Firebase y S3/Storage
 from app.firebase_config import db
@@ -735,6 +736,7 @@ async def _get_reportes_intervenciones(
     id_actividad: Optional[str] = None,
     grupo: Optional[str] = None,
     current_user: Optional[CurrentUser] = None,
+    limit: Optional[int] = 200,
 ) -> dict:
     """
     Handler unificado para GET de reportes de intervención.
@@ -762,7 +764,7 @@ async def _get_reportes_intervenciones(
 
         # Si se proporciona un ID específico, buscar directamente por document ID
         if id:
-            doc = reportes_ref.document(id).get()
+            doc = await asyncio.to_thread(reportes_ref.document(id).get)
             if doc.exists:
                 data = doc.to_dict()
                 # Verificar que el reporte pertenece al grupo solicitado
@@ -787,7 +789,8 @@ async def _get_reportes_intervenciones(
                 }
 
             # Fallback: buscar por campo interno 'id' dentro del grupo
-            docs = reportes_ref.where("grupo", "==", grupo_key).where("id", "==", id).stream()
+            fallback_q = reportes_ref.where("grupo", "==", grupo_key).where("id", "==", id).limit(50)
+            docs = await asyncio.to_thread(lambda: list(fallback_q.stream()))
             reportes = []
             for doc in docs:
                 data = doc.to_dict()
@@ -819,8 +822,13 @@ async def _get_reportes_intervenciones(
         if id_actividad:
             query = query.where('id_actividad', '==', id_actividad.strip())
 
-        # Obtener documentos
-        docs = query.stream()
+        # Cap defensivo: limita la cantidad de documentos traidos para evitar OOM
+        # y latencias altas. Por defecto 200; el cliente puede pedir menos via Query.
+        effective_limit = limit if (limit is not None and limit > 0) else 200
+        query = query.limit(effective_limit)
+
+        # Obtener documentos sin bloquear el event loop
+        docs = await asyncio.to_thread(lambda: list(query.stream()))
 
         reportes = []
         for doc in docs:
@@ -1126,10 +1134,12 @@ async def get_reportes_intervenciones_unificado(
     id: Optional[str] = Query(None, min_length=1, description="Filtrar por ID del reporte"),
     id_actividad: Optional[str] = Query(None, min_length=1, description="Filtrar por ID de actividad"),
     grupo: Optional[str] = Query(None, min_length=1, description="Filtrar por nombre del grupo"),
+    limit: Optional[int] = Query(200, ge=1, le=1000, description="Maximo de reportes a devolver"),
     current_user: CurrentUser = Depends(get_current_user),
 ):
     return await _get_reportes_intervenciones(
-        grupo_key=grupo_key, id=id, id_actividad=id_actividad, grupo=grupo, current_user=current_user
+        grupo_key=grupo_key, id=id, id_actividad=id_actividad, grupo=grupo,
+        current_user=current_user, limit=limit,
     )
 
 
@@ -1291,7 +1301,7 @@ async def get_grupos(
         if grupo:
             query = query.where("nombre", "==", grupo.strip())
 
-        docs = query.stream()
+        docs = await stream_to_list(query)
 
         grupos = []
         for doc in docs:
@@ -1409,7 +1419,12 @@ async def get_actividades(
     Obtener actividades con filtro por grupo y paginación cursor.
     """
     try:
-        def obtener_personal_asignado(actividad_document_id: str, actividad_id_interno: Optional[str] = None, doc_data: dict = None) -> list[dict]:
+        def obtener_personal_asignado(
+            actividad_document_id: str,
+            actividad_id_interno: Optional[str] = None,
+            doc_data: Optional[dict] = None,
+            fallback_index: Optional[dict[str, list[dict]]] = None,
+        ) -> list[dict]:
             """
             Lee personal_asignado del campo del documento (fuente principal, escrita por PATCH/PUT).
             Si el campo no existe o está vacío, hace fallback a la subcolección
@@ -1419,7 +1434,27 @@ async def get_actividades(
             if doc_data and isinstance(doc_data.get("personal_asignado"), list) and len(doc_data["personal_asignado"]) > 0:
                 return doc_data["personal_asignado"]
 
-            # 2) Fallback: subcolección personal_asignado_actividad
+            # 2) Fallback indexado en batch (si está disponible)
+            if fallback_index is not None:
+                personal_encontrado = []
+                ids_vistos = set()
+                posibles_claves = [
+                    f"actividad_document_id::{actividad_document_id}",
+                    f"actividad_id::{actividad_document_id}",
+                ]
+                if actividad_id_interno and actividad_id_interno != actividad_document_id:
+                    posibles_claves.append(f"actividad_id::{actividad_id_interno}")
+
+                for clave in posibles_claves:
+                    for item in fallback_index.get(clave, []):
+                        item_id = item.get("id")
+                        if item_id in ids_vistos:
+                            continue
+                        ids_vistos.add(item_id)
+                        personal_encontrado.append(item)
+                return personal_encontrado
+
+            # 3) Fallback legacy por consulta directa (single item)
             personal_encontrado = []
             ids_vistos = set()
 
@@ -1447,7 +1482,7 @@ async def get_actividades(
 
         # Búsqueda por ID único — sin paginación
         if id:
-            doc = plan_ref.document(id).get()
+            doc = await run_blocking(plan_ref.document(id).get)
             if doc.exists:
                 data = doc.to_dict()
                 actividad_id_interno = data.get("id") if isinstance(data, dict) else None
@@ -1466,7 +1501,7 @@ async def get_actividades(
                 }
 
             # Fallback: buscar por campo interno 'id'
-            docs = plan_ref.where("id", "==", id).stream()
+            docs = await stream_to_list(plan_ref.where("id", "==", id).limit(50))
             actividades = []
             for doc in docs:
                 data = doc.to_dict()
@@ -1496,24 +1531,69 @@ async def get_actividades(
 
         # Paginación cursor-based (Firestore no soporta OFFSET)
         if start_after:
-            cursor_snap = plan_ref.document(start_after).get()
+            cursor_snap = await asyncio.to_thread(plan_ref.document(start_after).get)
             if cursor_snap.exists:
                 query = query.start_after(cursor_snap)
 
         query = query.limit(limit)
-        docs = query.stream()
 
-        actividades = []
-        last_doc_id = None
-        for doc in docs:
-            data = doc.to_dict()
-            actividad_id_interno = data.get("id") if isinstance(data, dict) else None
-            personal = obtener_personal_asignado(doc.id, actividad_id_interno, doc_data=data)
-            data['id'] = doc.id
-            data['grupo'] = personal
-            data['personal_asignado'] = personal
-            actividades.append(data)
-            last_doc_id = doc.id
+        def _materialize_actividades():
+            """Itera el stream y construye la lista en un thread worker.
+            Mantiene las llamadas anidadas a Firestore (obtener_personal_asignado)
+            fuera del event loop.
+            """
+            docs = list(query.stream())
+            out = []
+            last_id = docs[-1].id if docs else None
+
+            # Indexar fallback de personal_asignado en batch para evitar N+1.
+            fallback_candidates = []
+            for doc in docs:
+                data = doc.to_dict() or {}
+                if not (isinstance(data.get("personal_asignado"), list) and len(data["personal_asignado"]) > 0):
+                    fallback_candidates.append((doc.id, data.get("id")))
+
+            fallback_index: dict[str, list[dict]] = {}
+
+            def _chunks(items: list[str], size: int = 30):
+                for i in range(0, len(items), size):
+                    yield items[i:i + size]
+
+            if fallback_candidates:
+                doc_ids = list({doc_id for doc_id, _ in fallback_candidates if doc_id})
+                internal_ids = list({str(int_id) for _, int_id in fallback_candidates if int_id})
+
+                def _accumulate(campo: str, valores: list[str]):
+                    if not valores:
+                        return
+                    for batch in _chunks(valores, 30):
+                        q = db.collection("personal_asignado_actividad").where(campo, "in", batch)
+                        for pdoc in q.stream():
+                            pdata = pdoc.to_dict() or {}
+                            pdata["id"] = pdoc.id
+                            k = f"{campo}::{pdata.get(campo)}"
+                            fallback_index.setdefault(k, []).append(pdata)
+
+                _accumulate("actividad_document_id", doc_ids)
+                _accumulate("actividad_id", doc_ids)
+                _accumulate("actividad_id", internal_ids)
+
+            for doc in docs:
+                data = doc.to_dict() or {}
+                actividad_id_interno = data.get("id") if isinstance(data, dict) else None
+                personal = obtener_personal_asignado(
+                    doc.id,
+                    actividad_id_interno,
+                    doc_data=data,
+                    fallback_index=fallback_index,
+                )
+                data['id'] = doc.id
+                data['grupo'] = personal
+                data['personal_asignado'] = personal
+                out.append(data)
+            return out, last_id
+
+        actividades, last_doc_id = await asyncio.to_thread(_materialize_actividades)
 
         # Ordenar por marca_temporal descendente (más reciente primero)
         actividades.sort(key=lambda a: a.get("marca_temporal", ""), reverse=True)
@@ -1588,7 +1668,8 @@ Registra una convocatoria de actividad con georreferenciación automática del p
     response_model=ConvocarActividadResponse
 )
 async def convocar_actividad(
-    body: ConvocarActividadRequest = Body(...)
+    body: ConvocarActividadRequest = Body(...),
+    background_tasks: BackgroundTasks = None,
 ):
     """
     Convoca una actividad y la registra en la base de datos, calculando comuna/corregimiento y barrio/vereda.
@@ -1630,10 +1711,12 @@ async def convocar_actividad(
             "estado_actividad": "Programada"
         }
         # Crear evento en Google Calendar con el coordinador como asistente
+        # (sigue siendo inline porque necesitamos event_id para persistirlo)
         try:
-            created_event = create_activity_event(
+            created_event = await asyncio.to_thread(
+                create_activity_event,
                 actividad_data=actividad_data,
-                attendee_emails=[body.email]
+                attendee_emails=[body.email],
             )
             if created_event:
                 actividad_data['calendar_event_id'] = created_event.get('id')
@@ -1642,28 +1725,42 @@ async def convocar_actividad(
             logger.warning(f"[CALENDAR] Error creando evento: {e}")
             actividad_data['calendar_event_error'] = str(e)
 
-        # Guardar en Firebase
-        db.collection("plan_distrito_verde").document(actividad_id).set(actividad_data)
+        # Guardar en Firebase (sin bloquear el event loop)
+        await asyncio.to_thread(
+            db.collection("plan_distrito_verde").document(actividad_id).set,
+            actividad_data,
+        )
 
-        # Email de confirmación al coordinador (no bloqueante)
-        try:
-            send_activity_confirmation_email(body.email, actividad_data)
-        except Exception as e:
-            logger.warning(f"[GMAIL] Error enviando confirmación: {e}")
+        # Notificaciones por email: se envian en background para no demorar la respuesta.
+        def _enviar_notificaciones_actividad():
+            try:
+                send_activity_confirmation_email(body.email, actividad_data)
+            except Exception as e:
+                logger.warning(f"[GMAIL] Error enviando confirmación: {e}")
+            try:
+                app_url = os.getenv('FRONTEND_URL', 'https://dagma-360-capture.vercel.app')
+                grupos_docs = list(db.collection("grupos").stream())
+                for gdoc in grupos_docs:
+                    gdata = gdoc.to_dict() or {}
+                    lider = gdata.get("lider") or {}
+                    lider_email = lider.get("email") or gdata.get("email") or ""
+                    lider_nombre = lider.get("nombre") or gdata.get("nombre") or ""
+                    if lider_email and "@" in lider_email:
+                        try:
+                            send_leaders_notification_email(lider_email, lider_nombre, actividad_data, app_url)
+                        except Exception as e:
+                            logger.warning(f"[GMAIL] Error notificando lider {lider_email}: {e}")
+            except Exception as e:
+                logger.warning(f"[GMAIL] Error listando grupos para notificar: {e}")
 
-        # Notificar a todos los líderes de grupos para asignar personal
-        try:
-            app_url = os.getenv('FRONTEND_URL', 'https://dagma-360-capture.vercel.app')
-            grupos_docs = db.collection("grupos").stream()
-            for gdoc in grupos_docs:
-                gdata = gdoc.to_dict() or {}
-                lider = gdata.get("lider") or {}
-                lider_email = lider.get("email") or gdata.get("email") or ""
-                lider_nombre = lider.get("nombre") or gdata.get("nombre") or ""
-                if lider_email and "@" in lider_email:
-                    send_leaders_notification_email(lider_email, lider_nombre, actividad_data, app_url)
-        except Exception as e:
-            logger.warning(f"[GMAIL] Error enviando notificaciones a líderes: {e}")
+        if background_tasks is not None:
+            background_tasks.add_task(_enviar_notificaciones_actividad)
+        else:
+            # Fallback (tests / llamada directa): mantener comportamiento previo de best-effort
+            try:
+                _enviar_notificaciones_actividad()
+            except Exception:
+                pass
 
         return ConvocarActividadResponse(
             success=True,
@@ -1709,10 +1806,10 @@ async def delete_actividad(actividad_id: str):
 
         # Intentar primero por ID de documento
         doc_ref = collection_ref.document(actividad_id)
-        doc_snapshot = doc_ref.get()
+        doc_snapshot = await run_blocking(doc_ref.get)
 
         if doc_snapshot.exists:
-            doc_ref.delete()
+            await run_blocking(doc_ref.delete)
             return {
                 "success": True,
                 "id": actividad_id,
@@ -1721,8 +1818,8 @@ async def delete_actividad(actividad_id: str):
             }
 
         # Fallback: buscar por campo interno 'id'
-        docs = collection_ref.where("id", "==", actividad_id).limit(1).stream()
-        matching_doc = next(docs, None)
+        docs = await stream_to_list(collection_ref.where("id", "==", actividad_id).limit(1))
+        matching_doc = docs[0] if docs else None
 
         if not matching_doc:
             raise HTTPException(
@@ -1730,7 +1827,7 @@ async def delete_actividad(actividad_id: str):
                 detail=f"No se encontró actividad con id: {actividad_id}"
             )
 
-        collection_ref.document(matching_doc.id).delete()
+        await run_blocking(collection_ref.document(matching_doc.id).delete)
 
         return {
             "success": True,
@@ -1818,25 +1915,25 @@ async def update_actividad(
 
         # Resolver documento
         doc_ref = collection_ref.document(actividad_id)
-        doc_snapshot = doc_ref.get()
+        doc_snapshot = await run_blocking(doc_ref.get)
 
         if not doc_snapshot.exists:
-            docs = collection_ref.where("id", "==", actividad_id).limit(1).stream()
-            matching_doc = next(docs, None)
+            docs = await stream_to_list(collection_ref.where("id", "==", actividad_id).limit(1))
+            matching_doc = docs[0] if docs else None
             if not matching_doc:
                 raise HTTPException(
                     status_code=404,
                     detail=f"No se encontró actividad con id: {actividad_id}"
                 )
             doc_ref = collection_ref.document(matching_doc.id)
-            doc_snapshot = doc_ref.get()
+            doc_snapshot = await run_blocking(doc_ref.get)
 
         # Datos anteriores (para detectar cambios en personal)
         data_anterior = doc_snapshot.to_dict() or {}
 
         # Actualizar en Firestore
-        doc_ref.update(body)
-        updated_doc = doc_ref.get()
+        await run_blocking(doc_ref.update, body)
+        updated_doc = await run_blocking(doc_ref.get)
         updated_data = updated_doc.to_dict() or {}
         updated_data['id'] = actividad_id
 
@@ -2040,7 +2137,7 @@ async def get_personal_operativo(
         if grupo:
             query = query.where("grupo", "==", grupo.strip())
 
-        docs = query.stream()
+        docs = await stream_to_list(query)
 
         personal = []
         for doc in docs:
@@ -2105,19 +2202,22 @@ async def verificar_registro_personal(
         if not current_user.at_least(Role.ADMINISTRADOR) and current_user.grupo:
             grupo = current_user.grupo
 
-        # 1. Obtener todos los emails registrados en users (índice en memoria)
-        users_query = db.collection("users").stream()
-        emails_registrados: set[str] = set()
-        for u in users_query:
-            u_data = u.to_dict() or {}
-            email_u = (u_data.get("email") or "").strip().lower()
-            if email_u:
-                emails_registrados.add(email_u)
+        # 1) Obtener emails registrados y personal en thread worker para no bloquear loop.
+        def _load_users_and_personal():
+            users_docs = list(db.collection("users").stream())
+            emails: set[str] = set()
+            for u in users_docs:
+                u_data = u.to_dict() or {}
+                email_u = (u_data.get("email") or "").strip().lower()
+                if email_u:
+                    emails.add(email_u)
 
-        # 2. Obtener personal_operativo (con filtro de grupo si aplica)
-        ref = db.collection("personal_operativo")
-        query = ref.where("grupo", "==", grupo.strip()) if grupo else ref
-        docs = list(query.stream())
+            ref = db.collection("personal_operativo")
+            q = ref.where("grupo", "==", grupo.strip()) if grupo else ref
+            personal_docs = list(q.stream())
+            return emails, personal_docs
+
+        emails_registrados, docs = await run_blocking(_load_users_and_personal)
 
         colombia_tz = pytz.timezone("America/Bogota")
         ahora = datetime.now(colombia_tz).isoformat()
@@ -2132,10 +2232,13 @@ async def verificar_registro_personal(
             estado = "Usuario registrado" if email_p in emails_registrados else "Usuario no registrado"
 
             # Actualizar campo en Firestore
-            db.collection("personal_operativo").document(doc.id).update({
-                "estado_registro": estado,
-                "estado_registro_verificado_en": ahora,
-            })
+            await run_blocking(
+                db.collection("personal_operativo").document(doc.id).update,
+                {
+                    "estado_registro": estado,
+                    "estado_registro_verificado_en": ahora,
+                },
+            )
 
             if estado == "Usuario registrado":
                 registrados += 1
@@ -2184,7 +2287,7 @@ async def _fetch_grupo_reportes(grupo_key: str, id_actividad: Optional[str], gru
         query = ref.where("grupo", "==", grupo_key)
         if id_actividad:
             query = query.where("id_actividad", "==", id_actividad.strip())
-        docs = query.stream()
+        docs = await stream_to_list(query)
         results = []
         for doc in docs:
             data = doc.to_dict()
@@ -2565,7 +2668,21 @@ async def get_asistencias_resumen(
     """
     try:
         tz_col = pytz.timezone("America/Bogota")
-        docs = db.collection("asistencia_actividades").stream()
+        docs = await stream_to_list(db.collection("asistencia_actividades"))
+        actividad_ids = [doc.id for doc in docs]
+
+        def _fetch_planes_map(ids: list[str]) -> dict[str, dict]:
+            if not ids:
+                return {}
+            refs = [db.collection("plan_distrito_verde").document(doc_id) for doc_id in ids]
+            out: dict[str, dict] = {}
+            for snap in db.get_all(refs):
+                if snap.exists:
+                    out[snap.id] = snap.to_dict() or {}
+            return out
+
+        planes_map = await run_blocking(_fetch_planes_map, actividad_ids)
+
         resultado = []
         for doc in docs:
             data = doc.to_dict()
@@ -2603,23 +2720,19 @@ async def get_asistencias_resumen(
 
             # Datos de la actividad desde plan_distrito_verde
             actividad_info: dict = {}
-            try:
-                act_doc = db.collection("plan_distrito_verde").document(doc.id).get()
-                if act_doc.exists:
-                    act = act_doc.to_dict() or {}
-                    punto = act.get("punto_encuentro") or {}
-                    actividad_info = {
-                        "fecha_actividad": act.get("fecha_actividad"),
-                        "hora_encuentro": act.get("hora_encuentro"),
-                        "tipo_jornada": act.get("tipo_jornada"),
-                        "objetivo_actividad": act.get("objetivo_actividad"),
-                        "estado_actividad": act.get("estado_actividad"),
-                        "direccion": punto.get("direccion"),
-                        "comunas_corregimiento": punto.get("comunas_corregimiento"),
-                        "barrio_vereda": punto.get("barrio_vereda"),
-                    }
-            except Exception:
-                pass  # Si falla la búsqueda del plan, continuar con lo disponible
+            act = planes_map.get(doc.id)
+            if act:
+                punto = act.get("punto_encuentro") or {}
+                actividad_info = {
+                    "fecha_actividad": act.get("fecha_actividad"),
+                    "hora_encuentro": act.get("hora_encuentro"),
+                    "tipo_jornada": act.get("tipo_jornada"),
+                    "objetivo_actividad": act.get("objetivo_actividad"),
+                    "estado_actividad": act.get("estado_actividad"),
+                    "direccion": punto.get("direccion"),
+                    "comunas_corregimiento": punto.get("comunas_corregimiento"),
+                    "barrio_vereda": punto.get("barrio_vereda"),
+                }
 
             resultado.append({
                 "actividad_id": doc.id,
@@ -2808,7 +2921,7 @@ async def backfill_geo_intervenciones(
         )
 
     col = db.collection(COLLECTION_REPORTES_INTERVENCIONES)
-    docs = col.stream()
+    docs = await stream_to_list(col)
 
     actualizados: list[dict] = []
     omitidos = 0

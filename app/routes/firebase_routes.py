@@ -4,6 +4,7 @@ Rutas de Firebase - Status y gestión de colecciones
 from fastapi import APIRouter, HTTPException
 from datetime import datetime, timezone
 from app.firebase_config import db
+from app.utils.firestore_async import run_blocking
 
 router = APIRouter(tags=["Firebase"])
 
@@ -14,8 +15,7 @@ async def firebase_status():
     """
     try:
         # Verificar conexión intentando acceder a Firestore
-        collections = db.collections()
-        collection_names = [col.id for col in collections]
+        collection_names = await run_blocking(lambda: [col.id for col in db.collections()])
         return {
             "status": "connected",
             "firestore": "available",
@@ -33,11 +33,10 @@ async def get_firebase_collections():
     Obtener información completa de todas las colecciones de Firestore
     """
     try:
-        collections = db.collections()
+        collections = await run_blocking(lambda: list(db.collections()))
         collections_info = []
         for col in collections:
-            docs = col.stream()
-            doc_count = sum(1 for _ in docs)
+            doc_count = await run_blocking(lambda c=col: sum(1 for _ in c.stream()))
             collections_info.append({
                 "name": col.id,
                 "document_count": doc_count,
@@ -57,13 +56,12 @@ async def get_firebase_collections_summary():
     Obtener resumen estadístico de las colecciones
     """
     try:
-        collections = db.collections()
+        collections = await run_blocking(lambda: list(db.collections()))
         total_collections = 0
         total_documents = 0
         for col in collections:
             total_collections += 1
-            docs = col.stream()
-            total_documents += sum(1 for _ in docs)
+            total_documents += await run_blocking(lambda c=col: sum(1 for _ in c.stream()))
         return {
             "success": True,
             "total_collections": total_collections,

@@ -8,6 +8,7 @@ from datetime import datetime, timezone, timedelta
 from pydantic import BaseModel, Field, field_validator
 import uuid
 from firebase_admin import firestore
+from app.utils.firestore_async import run_blocking, stream_to_list
 
 # Importar configuración de Firebase
 from app.firebase_config import db
@@ -108,7 +109,7 @@ async def obtener_reporte_completo(reporte_id: str) -> Dict[str, Any]:
     """
     # Obtener reporte base (reconocimiento)
     reporte_ref = db.collection('reconocimientos').document(reporte_id)
-    reporte_doc = reporte_ref.get()
+    reporte_doc = await run_blocking(reporte_ref.get)
     
     if not reporte_doc.exists:
         raise HTTPException(
@@ -121,7 +122,7 @@ async def obtener_reporte_completo(reporte_id: str) -> Dict[str, Any]:
     
     # Obtener información de seguimiento
     seguimiento_ref = db.collection('reportes_seguimiento').document(reporte_id)
-    seguimiento_doc = seguimiento_ref.get()
+    seguimiento_doc = await run_blocking(seguimiento_ref.get)
     
     if seguimiento_doc.exists:
         seguimiento_data = seguimiento_doc.to_dict()
@@ -147,7 +148,7 @@ async def obtener_reporte_completo(reporte_id: str) -> Dict[str, Any]:
         .where('reporte_id', '==', reporte_id) \
         .order_by('fecha', direction=firestore.Query.DESCENDING)
     
-    historial_docs = historial_ref.stream()
+    historial_docs = await stream_to_list(historial_ref)
     historial = []
     
     for hist_doc in historial_docs:
@@ -157,7 +158,7 @@ async def obtener_reporte_completo(reporte_id: str) -> Dict[str, Any]:
         # Obtener evidencias de este avance
         evidencias_ref = db.collection('evidencias_avance_reportes') \
             .where('historial_avance_id', '==', hist_doc.id)
-        evidencias_docs = evidencias_ref.stream()
+        evidencias_docs = await stream_to_list(evidencias_ref)
         
         evidencias = []
         for ev_doc in evidencias_docs:
@@ -225,7 +226,7 @@ async def get_reportes_seguimiento(
             query = query.where('encargado', '==', encargado)
         
         # Obtener documentos
-        docs = query.stream()
+        docs = await stream_to_list(query)
         
         # Procesar cada documento
         reportes = []
@@ -328,7 +329,7 @@ async def registrar_avance(
     try:
         # Verificar que el reporte existe
         reporte_ref = db.collection('reconocimientos').document(reporteId)
-        reporte_doc = reporte_ref.get()
+        reporte_doc = await run_blocking(reporte_ref.get)
         
         if not reporte_doc.exists:
             raise HTTPException(
@@ -338,7 +339,7 @@ async def registrar_avance(
         
         # Obtener o crear seguimiento
         seguimiento_ref = db.collection('reportes_seguimiento').document(reporteId)
-        seguimiento_doc = seguimiento_ref.get()
+        seguimiento_doc = await run_blocking(seguimiento_ref.get)
         
         if seguimiento_doc.exists:
             seguimiento_data = seguimiento_doc.to_dict()
@@ -395,7 +396,10 @@ async def registrar_avance(
             'created_at': fecha_actual
         }
         
-        db.collection('historial_avance_reportes').document(historial_id).set(historial_data)
+        await run_blocking(
+            db.collection('historial_avance_reportes').document(historial_id).set,
+            historial_data,
+        )
         
         # Guardar evidencias si existen
         for evidencia in avance.evidencias:
@@ -407,7 +411,10 @@ async def registrar_avance(
                 'descripcion': evidencia.descripcion,
                 'created_at': fecha_actual
             }
-            db.collection('evidencias_avance_reportes').document(evidencia_id).set(evidencia_data)
+            await run_blocking(
+                db.collection('evidencias_avance_reportes').document(evidencia_id).set,
+                evidencia_data,
+            )
         
         # Actualizar seguimiento
         seguimiento_update = {
@@ -426,7 +433,7 @@ async def registrar_avance(
                 'created_at': fecha_actual
             })
         
-        seguimiento_ref.set(seguimiento_update, merge=True)
+        await run_blocking(seguimiento_ref.set, seguimiento_update, merge=True)
         
         # Obtener reporte actualizado completo
         reporte_actualizado = await obtener_reporte_completo(reporteId)
@@ -475,7 +482,7 @@ async def asignar_encargado(
     try:
         # Verificar que el reporte existe
         reporte_ref = db.collection('reconocimientos').document(reporteId)
-        reporte_doc = reporte_ref.get()
+        reporte_doc = await run_blocking(reporte_ref.get)
         
         if not reporte_doc.exists:
             raise HTTPException(
@@ -487,7 +494,7 @@ async def asignar_encargado(
         seguimiento_ref = db.collection('reportes_seguimiento').document(reporteId)
         fecha_actual = datetime.now(timezone.utc)
         
-        seguimiento_doc = seguimiento_ref.get()
+        seguimiento_doc = await run_blocking(seguimiento_ref.get)
         
         update_data = {
             'encargado': data.encargado,
@@ -505,7 +512,7 @@ async def asignar_encargado(
                 'created_at': fecha_actual
             })
         
-        seguimiento_ref.set(update_data, merge=True)
+        await run_blocking(seguimiento_ref.set, update_data, merge=True)
         
         return {
             "success": True,
@@ -558,7 +565,7 @@ async def cambiar_prioridad(
     try:
         # Verificar que el reporte existe
         reporte_ref = db.collection('reconocimientos').document(reporteId)
-        reporte_doc = reporte_ref.get()
+        reporte_doc = await run_blocking(reporte_ref.get)
         
         if not reporte_doc.exists:
             raise HTTPException(
@@ -570,7 +577,7 @@ async def cambiar_prioridad(
         seguimiento_ref = db.collection('reportes_seguimiento').document(reporteId)
         fecha_actual = datetime.now(timezone.utc)
         
-        seguimiento_doc = seguimiento_ref.get()
+        seguimiento_doc = await run_blocking(seguimiento_ref.get)
         
         update_data = {
             'prioridad': data.prioridad,
@@ -588,7 +595,7 @@ async def cambiar_prioridad(
                 'created_at': fecha_actual
             })
         
-        seguimiento_ref.set(update_data, merge=True)
+        await run_blocking(seguimiento_ref.set, update_data, merge=True)
         
         return {
             "success": True,
@@ -636,7 +643,7 @@ async def get_historial_reporte(
     try:
         # Verificar que el reporte existe
         reporte_ref = db.collection('reconocimientos').document(reporteId)
-        reporte_doc = reporte_ref.get()
+        reporte_doc = await run_blocking(reporte_ref.get)
         
         if not reporte_doc.exists:
             raise HTTPException(
@@ -651,7 +658,7 @@ async def get_historial_reporte(
             .where('reporte_id', '==', reporteId) \
             .order_by('fecha', direction=firestore.Query.DESCENDING)
         
-        historial_docs = historial_ref.stream()
+        historial_docs = await stream_to_list(historial_ref)
         historial = []
         
         for hist_doc in historial_docs:
@@ -665,7 +672,7 @@ async def get_historial_reporte(
             # Obtener evidencias
             evidencias_ref = db.collection('evidencias_avance_reportes') \
                 .where('historial_avance_id', '==', hist_doc.id)
-            evidencias_docs = evidencias_ref.stream()
+            evidencias_docs = await stream_to_list(evidencias_ref)
             
             evidencias = []
             for ev_doc in evidencias_docs:
@@ -731,7 +738,7 @@ async def get_estadisticas(
     try:
         # Obtener todos los seguimientos
         seguimientos_ref = db.collection('reportes_seguimiento')
-        seguimientos_docs = seguimientos_ref.stream()
+        seguimientos_docs = await stream_to_list(seguimientos_ref)
         
         # Inicializar contadores
         total_reportes = 0
@@ -812,7 +819,7 @@ async def get_estadisticas(
             .where('fecha', '>=', fecha_hace_30_dias) \
             .order_by('fecha', direction=firestore.Query.ASCENDING)
         
-        historial_docs = historial_ref.stream()
+        historial_docs = await stream_to_list(historial_ref)
         
         tendencia_dict = {}
         for hist_doc in historial_docs:

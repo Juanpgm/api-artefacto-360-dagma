@@ -193,6 +193,50 @@ class TestListUsers:
         assert r.status_code == 200
 
 
+class TestLeaderCatalog:
+    def test_lider_can_list_all_lideres(self, mock_firebase):
+        leader_docs = []
+        for uid, full_name, grupo in [
+            ("uid-lider-1", "Ana Perez", "cuadrilla"),
+            ("uid-lider-2", "Bruno Ruiz", "vivero"),
+        ]:
+            doc = MagicMock()
+            doc.id = uid
+            doc.to_dict.return_value = {
+                "uid": uid,
+                "email": f"{uid}@dagma.gov.co",
+                "full_name": full_name,
+                "role": "lider",
+                "grupo": grupo,
+            }
+            leader_docs.append(doc)
+
+        mock_firebase["auth_routes_db"].collection.return_value.stream.return_value = leader_docs
+        # El endpoint ahora hace where("role"|"rol", "==", "lider").limit(500).stream(),
+        # ejecutando ambas queries en paralelo y dedup por doc.id.
+        # Devolvemos los mismos docs en la query principal y una lista vacia en la legacy.
+        collection_mock = mock_firebase["auth_routes_db"].collection.return_value
+        primary_where = MagicMock()
+        primary_where.limit.return_value.stream.return_value = leader_docs
+        legacy_where = MagicMock()
+        legacy_where.limit.return_value.stream.return_value = []
+        def _where_side_effect(field, op, value):
+            if field == "role":
+                return primary_where
+            if field == "rol":
+                return legacy_where
+            return MagicMock()
+        collection_mock.where.side_effect = _where_side_effect
+        client = _get_client_for_user("lider", mock_firebase)
+        r = client.get("/admin/users/lideres", headers={"Authorization": FAKE_TOKEN})
+
+        assert r.status_code == 200
+        data = r.json()
+        assert data["count"] == 2
+        grupos = {item["grupo"] for item in data["data"]}
+        assert grupos == {"cuadrilla", "vivero"}
+
+
 # ---------------------------------------------------------------------------
 # Tests: PATCH /admin/users/{uid}/role — reglas de escalamiento
 # ---------------------------------------------------------------------------

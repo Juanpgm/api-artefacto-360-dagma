@@ -15,6 +15,7 @@ import json
 from app.firebase_config import auth_client, db
 from app.models.roles import Role, can_assign_role, normalize_role
 from app.deps.authz import get_current_user, require_min_role, CurrentUser
+from app.utils.firestore_async import run_blocking, stream_to_list
 from slowapi import Limiter
 from slowapi.util import get_remote_address
 
@@ -110,25 +111,48 @@ class CompleteGoogleProfileRequest(BaseModel):
 # Helpers internos
 # ---------------------------------------------------------------------------
 
+# Cliente S3 reutilizado a nivel de modulo para evitar coste de creacion en cada request.
+_S3_CLIENT = None
+_S3_INIT_FAILED = False
+
+
+def _get_s3_client():
+    global _S3_CLIENT, _S3_INIT_FAILED
+    if _S3_CLIENT is not None or _S3_INIT_FAILED:
+        return _S3_CLIENT
+    try:
+        import boto3
+        aws_key = os.getenv("AWS_ACCESS_KEY_ID")
+        aws_secret = os.getenv("AWS_SECRET_ACCESS_KEY")
+        aws_region = os.getenv("AWS_REGION", "us-east-1")
+        if not aws_key or not aws_secret:
+            _S3_INIT_FAILED = True
+            return None
+        _S3_CLIENT = boto3.client(
+            "s3",
+            aws_access_key_id=aws_key,
+            aws_secret_access_key=aws_secret,
+            region_name=aws_region,
+        )
+        return _S3_CLIENT
+    except Exception as e:
+        logger.warning(f"No se pudo inicializar cliente S3: {e}")
+        _S3_INIT_FAILED = True
+        return None
+
+
 def _get_s3_photo_url(s3_key: str) -> Optional[str]:
     """
     Genera una URL pre-firmada de S3 para la foto de perfil (válida 7 días).
     Retorna None si la configuración de S3 no está disponible.
     """
     try:
-        import boto3
         bucket = os.getenv("S3_BUCKET_NAME") or os.getenv("AWS_S3_BUCKET_NAME")
-        aws_key = os.getenv("AWS_ACCESS_KEY_ID")
-        aws_secret = os.getenv("AWS_SECRET_ACCESS_KEY")
-        aws_region = os.getenv("AWS_REGION", "us-east-1")
-        if not all([bucket, aws_key, aws_secret]):
+        if not bucket:
             return None
-        s3 = boto3.client(
-            "s3",
-            aws_access_key_id=aws_key,
-            aws_secret_access_key=aws_secret,
-            region_name=aws_region,
-        )
+        s3 = _get_s3_client()
+        if s3 is None:
+            return None
         return s3.generate_presigned_url(
             "get_object",
             Params={"Bucket": bucket, "Key": s3_key},
@@ -717,7 +741,20 @@ async def list_system_users(
         reserved_params = {"limit", "offset", "full_name", "grupo", "email", "cellphone", "role", "uid"}
         extra_filters = {k: v.strip() for k, v in request.query_params.items() if k not in reserved_params and v and v.strip()}
         filters.update(extra_filters)
-        docs = db.collection("users").stream()
+
+        # Empuja filtros selectivos a Firestore para evitar cargar toda la coleccion.
+        # Orden de preferencia: uid (1 doc), email (~1 doc), role, grupo.
+        query = db.collection("users")
+        pushed_field = None
+        for candidate in ("uid", "email", "role", "grupo"):
+            if candidate in filters:
+                query = query.where(candidate, "==", filters[candidate])
+                pushed_field = candidate
+                break
+        # Cap defensivo: nunca traer mas de 1000 docs aunque no haya limit.
+        hard_cap = (limit or 0) + offset + 500 if limit is not None else 1000
+        query = query.limit(hard_cap)
+        docs = await stream_to_list(query)
         filtered_users = []
         for doc in docs:
             data = doc.to_dict() or {}
@@ -728,6 +765,8 @@ async def list_system_users(
                 data["role"] = normalize_role(data.get("rol"))
             matches = True
             for field_name, expected_value in filters.items():
+                if field_name == pushed_field:
+                    continue  # ya filtrado en Firestore
                 current_value = data.get(field_name)
                 if current_value is None:
                     matches = False
@@ -757,6 +796,67 @@ async def list_system_users(
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
+@router.get("/admin/users/lideres")
+async def list_leader_users(
+    current_user: CurrentUser = Depends(require_min_role(Role.LIDER)),
+):
+    """
+    Lista todos los usuarios con rol líder sin aplicar filtro por grupo.
+
+    Este endpoint alimenta los selectores de programación, que necesitan
+    ver el catálogo completo de líderes elegibles para los grupos requeridos.
+    """
+    try:
+        # Filtro a nivel Firestore para no escanear toda la coleccion.
+        # Algunos docs antiguos pueden tener el rol guardado en "rol" en lugar de "role";
+        # se traen ambos y se deduplican por uid.
+        primary_q = db.collection("users").where("role", "==", Role.LIDER).limit(500)
+        legacy_q = db.collection("users").where("rol", "==", Role.LIDER).limit(500)
+        primary_docs, legacy_docs = await asyncio.gather(
+            stream_to_list(primary_q),
+            stream_to_list(legacy_q),
+        )
+        seen: set = set()
+        lideres = []
+        for doc in list(primary_docs) + list(legacy_docs):
+            if doc.id in seen:
+                continue
+            seen.add(doc.id)
+            data = doc.to_dict() or {}
+            if "uid" not in data or not data.get("uid"):
+                data["uid"] = doc.id
+
+            role = normalize_role(data.get("role") or data.get("rol"))
+            if role != Role.LIDER:
+                continue
+
+            lideres.append(
+                {
+                    "uid": data.get("uid", doc.id),
+                    "email": data.get("email", ""),
+                    "full_name": data.get("full_name") or data.get("nombre_completo") or data.get("displayName") or data.get("email", ""),
+                    "grupo": data.get("grupo"),
+                    "role": role,
+                    "photoURL": data.get("photoURL"),
+                    "cellphone": data.get("cellphone"),
+                }
+            )
+
+        lideres.sort(
+            key=lambda item: (
+                str(item.get("full_name") or "").strip().lower(),
+                str(item.get("grupo") or "").strip().lower(),
+            )
+        )
+
+        return {
+            "success": True,
+            "data": lideres,
+            "count": len(lideres),
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
 @router.get("/auth/admin/users", dependencies=[Depends(require_min_role(Role.ADMINISTRADOR))])
 async def list_firebase_users(limit: int = 100):
@@ -812,7 +912,8 @@ async def get_audit_logs(limit: int = 100, user_uid: Optional[str] = None, actio
         query = db.collection("audit_role_changes").order_by("timestamp", direction="DESCENDING").limit(limit)
         if user_uid:
             query = query.where("target_uid", "==", user_uid)
-        logs = [{**doc.to_dict(), "id": doc.id} for doc in query.stream()]
+        docs = await stream_to_list(query)
+        logs = [{**(doc.to_dict() or {}), "id": doc.id} for doc in docs]
         return {"logs": logs, "total": len(logs)}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
@@ -820,7 +921,8 @@ async def get_audit_logs(limit: int = 100, user_uid: Optional[str] = None, actio
 @router.get("/auth/admin/system/stats", dependencies=[Depends(require_min_role(Role.ADMINISTRADOR))])
 async def get_system_stats():
     try:
-        users_count = len(list(db.collection("users").stream()))
+        # Mantiene conteo exacto, pero fuera del event loop.
+        users_count = await run_blocking(lambda: len(list(db.collection("users").stream())))
         return {"total_users": users_count, "total_roles": len(Role), "timestamp": datetime.now(timezone.utc).isoformat()}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
