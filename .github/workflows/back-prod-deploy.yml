@@ -12,7 +12,7 @@ jobs:
       - uses: actions/setup-node@v4
         with: { node-version: '20' }
       - run: npm install -g @railway/cli
-      - run: railway up --service ${{ secrets.RAILWAY_SERVICE || 'back' }} --detach
+      - run: railway up --service ${{ secrets.RAILWAY_SERVICE || 'web' }} --detach
         env:
           RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
       - name: Health check
