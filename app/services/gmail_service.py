@@ -222,34 +222,34 @@ def _send_via_smtp(msg: MIMEMultipart, to: str) -> bool:
 
     # Forzar IPv4: algunos entornos (Railway, etc.) resuelven smtp.gmail.com a IPv6
     # pero no tienen ruta IPv6 saliente → [Errno 101] Network is unreachable.
-    # Resolvemos a IPv4 explícito y conectamos por IP, manteniendo SNI/hostname para TLS.
+    # Monkey-patch temporal de socket.getaddrinfo para filtrar a AF_INET y conservar
+    # SNI/hostname original para la validación TLS.
     import socket as _socket
-    try:
-        host_ipv4 = _socket.gethostbyname(smtp_host)
-    except Exception as e:
-        logger.error(f"[SMTP] No se pudo resolver IPv4 de {smtp_host}: {e}")
-        return False
+    _orig_getaddrinfo = _socket.getaddrinfo
 
+    def _ipv4_only_getaddrinfo(host, port, family=0, type=0, proto=0, flags=0):
+        return _orig_getaddrinfo(host, port, _socket.AF_INET, type, proto, flags)
+
+    _socket.getaddrinfo = _ipv4_only_getaddrinfo
     try:
         if smtp_port == 465:
-            import ssl as _ssl
-            ctx = _ssl.create_default_context()
-            with smtplib.SMTP_SSL(host_ipv4, smtp_port, timeout=20,
-                                  context=ctx, server_hostname=smtp_host) as server:
+            with smtplib.SMTP_SSL(smtp_host, smtp_port, timeout=20) as server:
                 server.login(smtp_user, smtp_password)
                 server.sendmail(smtp_user, [to], msg.as_string())
         else:
-            with smtplib.SMTP(host_ipv4, smtp_port, timeout=20) as server:
+            with smtplib.SMTP(smtp_host, smtp_port, timeout=20) as server:
                 server.ehlo()
                 server.starttls()
                 server.ehlo()
                 server.login(smtp_user, smtp_password)
                 server.sendmail(smtp_user, [to], msg.as_string())
-        logger.info(f"[SMTP] Email enviado a {to} (host={smtp_host}/{host_ipv4}, port={smtp_port})")
+        logger.info(f"[SMTP] Email enviado a {to} (host={smtp_host}, port={smtp_port}, ipv4)")
         return True
     except Exception as e:
-        logger.error(f"[SMTP] Error enviando a {to} (host={smtp_host}/{host_ipv4}, port={smtp_port}): {e}")
+        logger.error(f"[SMTP] Error enviando a {to} (host={smtp_host}, port={smtp_port}): {e}")
         return False
+    finally:
+        _socket.getaddrinfo = _orig_getaddrinfo
 
 
 def _send_raw_email(to: str, subject: str, html_body: str,
