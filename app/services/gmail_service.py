@@ -220,22 +220,35 @@ def _send_via_smtp(msg: MIMEMultipart, to: str) -> bool:
         logger.warning("[SMTP] SMTP_HOST, SMTP_USER o SMTP_PASSWORD no configurados")
         return False
 
+    # Forzar IPv4: algunos entornos (Railway, etc.) resuelven smtp.gmail.com a IPv6
+    # pero no tienen ruta IPv6 saliente → [Errno 101] Network is unreachable.
+    # Resolvemos a IPv4 explícito y conectamos por IP, manteniendo SNI/hostname para TLS.
+    import socket as _socket
+    try:
+        host_ipv4 = _socket.gethostbyname(smtp_host)
+    except Exception as e:
+        logger.error(f"[SMTP] No se pudo resolver IPv4 de {smtp_host}: {e}")
+        return False
+
     try:
         if smtp_port == 465:
-            with smtplib.SMTP_SSL(smtp_host, smtp_port, timeout=20) as server:
+            import ssl as _ssl
+            ctx = _ssl.create_default_context()
+            with smtplib.SMTP_SSL(host_ipv4, smtp_port, timeout=20,
+                                  context=ctx, server_hostname=smtp_host) as server:
                 server.login(smtp_user, smtp_password)
                 server.sendmail(smtp_user, [to], msg.as_string())
         else:
-            with smtplib.SMTP(smtp_host, smtp_port, timeout=20) as server:
+            with smtplib.SMTP(host_ipv4, smtp_port, timeout=20) as server:
                 server.ehlo()
                 server.starttls()
                 server.ehlo()
                 server.login(smtp_user, smtp_password)
                 server.sendmail(smtp_user, [to], msg.as_string())
-        logger.info(f"[SMTP] Email enviado a {to} (port={smtp_port})")
+        logger.info(f"[SMTP] Email enviado a {to} (host={smtp_host}/{host_ipv4}, port={smtp_port})")
         return True
     except Exception as e:
-        logger.error(f"[SMTP] Error enviando a {to} (host={smtp_host}, port={smtp_port}): {e}")
+        logger.error(f"[SMTP] Error enviando a {to} (host={smtp_host}/{host_ipv4}, port={smtp_port}): {e}")
         return False
 
 
