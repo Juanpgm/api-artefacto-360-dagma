@@ -1,0 +1,18 @@
+{% extends "_base.html" %}
+{% import "_macros.html" as m %}
+
+{% block content %}
+<p>Estimado/a <strong>{{ leader_name | default('Líder') }}</strong>,</p>
+<p>Le informamos que ha sido designado/a como <strong>líder de la siguiente actividad ambiental</strong>
+   en el sistema <strong>Artefacto 360 DAGMA</strong>. Su responsabilidad será coordinar al personal
+   asignado y reportar la asistencia el día de la jornada.</p>
+<h3 style="color:#2e7d32;margin:18px 0 8px;">Detalles de la Actividad</h3>
+{{ m.activity_details_table(actividad) }}
+{{ m.calendar_button(actividad) }}
+{{ m.maps_button(actividad) }}
+{{ m.cta_button(app_url, 'Abrir actividad en la App', '#2e7d32') }}
+<p style="margin-top:16px;">
+  Recuerde verificar el personal asignado y registrar la asistencia al finalizar la jornada.
+  El archivo adjunto <strong>actividad_dagma.ics</strong> le permite añadir esta actividad a su calendario.
+</p>
+{% endblock %}

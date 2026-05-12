@@ -1,0 +1,16 @@
+{% extends "_base.html" %}
+{% import "_macros.html" as m %}
+
+{% block content %}
+<p>Estimado/a coordinador/a,</p>
+<p>La siguiente actividad ambiental ha sido registrada exitosamente en el sistema
+   <strong>Artefacto 360 DAGMA</strong>.</p>
+<h3 style="color:#2e7d32;margin:18px 0 8px;">Detalles de la Actividad</h3>
+{{ m.activity_details_table(actividad) }}
+{{ m.calendar_button(actividad) }}
+{{ m.maps_button(actividad) }}
+<p style="margin-top:16px;">
+  El archivo adjunto <strong>actividad_dagma.ics</strong> le permite agregar esta actividad directamente
+  a Google Calendar, Outlook o Apple Calendar.
+</p>
+{% endblock %}

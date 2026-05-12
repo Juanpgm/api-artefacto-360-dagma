@@ -38,6 +38,8 @@ from app.services.gmail_service import (
     send_assignment_notification_email,
     send_removal_notification_email,
     send_leaders_notification_email,
+    send_activity_leader_assigned_email,
+    send_assignment_summary_leader_email,
 )
 from app.services.calendar_service import create_activity_event, sync_event_personnel
 
@@ -1640,6 +1642,7 @@ class ConvocarActividadRequest(BaseModel):
     duracion_actividad: float = Field(..., gt=0, description="Duración de la actividad en horas")
     grupos_requeridos: list[str] = Field(..., description="Lista de grupos requeridos")
     lider_actividad: str = Field(..., description="Líder de la actividad")
+    lider_actividad_email: str = Field(None, description="Email del líder de la actividad (opcional). Si se provee, se le enviará una notificación específica como líder.")
     punto_encuentro: dict = Field(..., description="Punto de encuentro (geometry, direccion)")
     observaciones: str = Field(None, description="Observaciones")
     telefono: str = Field(..., description="Teléfono de contacto")
@@ -1703,6 +1706,7 @@ async def convocar_actividad(
             "duracion_actividad": body.duracion_actividad,
             "grupos_requeridos": body.grupos_requeridos,
             "lider_actividad": body.lider_actividad,
+            "lider_actividad_email": (body.lider_actividad_email or "").strip(),
             "punto_encuentro": punto,
             "observaciones": body.observaciones or "",
             "telefono": body.telefono,
@@ -1737,14 +1741,57 @@ async def convocar_actividad(
                 send_activity_confirmation_email(body.email, actividad_data)
             except Exception as e:
                 logger.warning(f"[GMAIL] Error enviando confirmación: {e}")
+
+            # Email específico al LÍDER de la actividad (si se informó email explícito
+            # o se puede resolver buscando por nombre en colección `users`).
+            try:
+                lider_email = (body.lider_actividad_email or "").strip()
+                lider_nombre = (body.lider_actividad or "").strip()
+                if not lider_email and lider_nombre:
+                    # Fallback: buscar usuario por nombre con rol líder.
+                    try:
+                        for rol_field in ("role", "rol"):
+                            q = (db.collection("users")
+                                 .where(rol_field, "in", ["lider", "líder", "LIDER", "LÍDER"]))
+                            for udoc in q.stream():
+                                ud = udoc.to_dict() or {}
+                                nombre_db = (ud.get("nombre_completo") or ud.get("nombre") or "").strip()
+                                if nombre_db and nombre_db.lower() == lider_nombre.lower():
+                                    lider_email = (ud.get("email") or "").strip()
+                                    break
+                            if lider_email:
+                                break
+                    except Exception as e:
+                        logger.debug(f"[GMAIL] No se pudo resolver email del líder por nombre: {e}")
+                if lider_email and "@" in lider_email:
+                    try:
+                        send_activity_leader_assigned_email(lider_email, lider_nombre, actividad_data)
+                    except Exception as e:
+                        logger.warning(f"[GMAIL] Error notificando líder de actividad {lider_email}: {e}")
+            except Exception as e:
+                logger.warning(f"[GMAIL] Error en flujo líder-de-actividad: {e}")
             try:
                 app_url = os.getenv('FRONTEND_URL', 'https://dagma-360-capture.vercel.app')
                 grupos_docs = list(db.collection("grupos").stream())
                 for gdoc in grupos_docs:
                     gdata = gdoc.to_dict() or {}
-                    lider = gdata.get("lider") or {}
-                    lider_email = lider.get("email") or gdata.get("email") or ""
-                    lider_nombre = lider.get("nombre") or gdata.get("nombre") or ""
+                    lider_raw = gdata.get("lider")
+                    # `lider` puede venir como dict {email,nombre} o como string (email o nombre).
+                    if isinstance(lider_raw, dict):
+                        lider_email = (lider_raw.get("email") or "").strip()
+                        lider_nombre = (lider_raw.get("nombre") or "").strip()
+                    elif isinstance(lider_raw, str):
+                        lider_str = lider_raw.strip()
+                        if "@" in lider_str:
+                            lider_email, lider_nombre = lider_str, ""
+                        else:
+                            lider_email, lider_nombre = "", lider_str
+                    else:
+                        lider_email, lider_nombre = "", ""
+                    if not lider_email:
+                        lider_email = (gdata.get("email") or "").strip()
+                    if not lider_nombre:
+                        lider_nombre = (gdata.get("nombre") or "").strip()
                     if lider_email and "@" in lider_email:
                         try:
                             send_leaders_notification_email(lider_email, lider_nombre, actividad_data, app_url)
@@ -1995,6 +2042,23 @@ async def update_actividad(
                         logger.info(f"[EMAIL] Resultado desasignacion {email_addr}: {result}")
                     except Exception as e:
                         logger.error(f"[EMAIL] Error enviando desasignacion a {email_addr}: {e}", exc_info=True)
+
+                # CC al líder de la actividad con el resumen del delta (agregados/removidos).
+                lider_email_act = (actividad_data.get("lider_actividad_email") or "").strip()
+                if lider_email_act and "@" in lider_email_act and (emails_agregados or emails_eliminados):
+                    try:
+                        agregados_list = [mapa_nuevos.get(e, {}) for e in emails_agregados]
+                        removidos_list = [mapa_anteriores.get(e, {}) for e in emails_eliminados]
+                        await asyncio.to_thread(
+                            send_assignment_summary_leader_email,
+                            leader_email=lider_email_act,
+                            leader_name=actividad_data.get("lider_actividad", ""),
+                            actividad_data=actividad_data,
+                            agregados=agregados_list,
+                            removidos=removidos_list,
+                        )
+                    except Exception as e:
+                        logger.warning(f"[EMAIL] Error enviando resumen a líder {lider_email_act}: {e}")
 
             if emails_agregados or emails_eliminados:
                 task = asyncio.create_task(_enviar_emails())

@@ -1,0 +1,22 @@
+{% extends "_base.html" %}
+{% import "_macros.html" as m %}
+
+{% block content %}
+<p>Estimado/a <strong>{{ nombre }}</strong>,</p>
+<p>Ha sido asignado/a como integrante del equipo <strong>{{ grupo }}</strong> para participar
+   en la siguiente actividad ambiental de DAGMA.</p>
+<h3 style="color:#1565c0;margin:18px 0 8px;">Detalles de la Actividad</h3>
+{{ m.activity_details_table(actividad) }}
+{{ m.calendar_button(actividad) }}
+{{ m.maps_button(actividad) }}
+<p style="margin-top:16px;">
+  Abra el archivo adjunto <strong>actividad_dagma.ics</strong> para agregar esta actividad
+  a su Google Calendar, Outlook o Apple Calendar con recordatorio automático.
+</p>
+<p>
+  Por favor, confírmele su asistencia al líder:<br>
+  <strong>{{ actividad.get('lider_actividad', 'N/A') }}</strong> &mdash;
+  Tel: <strong>{{ actividad.get('telefono', 'N/A') }}</strong>
+</p>
+<p>Preséntese puntualmente en el punto de encuentro indicado.</p>
+{% endblock %}

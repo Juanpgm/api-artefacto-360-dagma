@@ -1,0 +1,76 @@
+{% extends "_base.html" %}
+{% import "_macros.html" as m %}
+
+{% block content %}
+<p>Estimado/a <strong>{{ leader_name | default('Líder') }}</strong>,</p>
+<p>A continuación encontrará el <strong>reporte ejecutivo semanal de asistencia</strong> del grupo
+   <strong>{{ grupo }}</strong> correspondiente al periodo
+   <strong>{{ period_start }}</strong> al <strong>{{ period_end }}</strong>.</p>
+
+<h3 style="color:#2e7d32;margin:18px 0 8px;">Resumen</h3>
+{{ m.kv_table([
+  ('Actividades programadas', stats.actividades_total | default(0)),
+  ('Actividades realizadas', stats.actividades_realizadas | default(0)),
+  ('Personal del grupo', stats.personal_total | default(0)),
+  ('Convocados (suma)', stats.convocados_total | default(0)),
+  ('Asistentes (suma)', stats.asistentes_total | default(0)),
+  ('% Asistencia promedio', (stats.porcentaje_asistencia | default(0) | string) ~ '%'),
+  ('Inasistencias', stats.inasistencias_total | default(0)),
+]) }}
+
+<h3 style="color:#2e7d32;margin:18px 0 8px;">Detalle por actividad</h3>
+<table style="border-collapse:collapse;width:100%;font-family:Arial,sans-serif;font-size:13px;margin:8px 0 16px;">
+  <thead>
+    <tr style="background:#2e7d32;color:#fff;">
+      <th style="padding:8px;text-align:left;">Fecha</th>
+      <th style="padding:8px;text-align:left;">Actividad</th>
+      <th style="padding:8px;text-align:center;">Convocados</th>
+      <th style="padding:8px;text-align:center;">Asistieron</th>
+      <th style="padding:8px;text-align:center;">% Asist.</th>
+    </tr>
+  </thead>
+  <tbody>
+    {% for row in actividades %}
+    <tr style="border-bottom:1px solid #eee;{% if loop.index is even %}background:#fafafa;{% endif %}">
+      <td style="padding:8px;">{{ row.fecha | default('—') }}</td>
+      <td style="padding:8px;">{{ row.objetivo | default('—') }}</td>
+      <td style="padding:8px;text-align:center;">{{ row.convocados | default(0) }}</td>
+      <td style="padding:8px;text-align:center;">{{ row.asistentes | default(0) }}</td>
+      <td style="padding:8px;text-align:center;font-weight:bold;color:{% if (row.porcentaje | default(0)) >= 80 %}#2e7d32{% elif (row.porcentaje | default(0)) >= 50 %}#f9a825{% else %}#c62828{% endif %};">
+        {{ row.porcentaje | default(0) }}%
+      </td>
+    </tr>
+    {% else %}
+    <tr><td colspan="5" style="padding:12px;text-align:center;color:#777;"><em>Sin actividades en el periodo.</em></td></tr>
+    {% endfor %}
+  </tbody>
+</table>
+
+{% if inasistentes_top %}
+<h3 style="color:#c62828;margin:18px 0 8px;">Personal con más inasistencias</h3>
+<table style="border-collapse:collapse;width:100%;font-family:Arial,sans-serif;font-size:13px;margin:8px 0 16px;">
+  <thead>
+    <tr style="background:#c62828;color:#fff;">
+      <th style="padding:8px;text-align:left;">Nombre</th>
+      <th style="padding:8px;text-align:center;">Convocatorias</th>
+      <th style="padding:8px;text-align:center;">Inasistencias</th>
+    </tr>
+  </thead>
+  <tbody>
+    {% for p in inasistentes_top %}
+    <tr style="border-bottom:1px solid #eee;">
+      <td style="padding:8px;">{{ p.nombre }}</td>
+      <td style="padding:8px;text-align:center;">{{ p.convocatorias }}</td>
+      <td style="padding:8px;text-align:center;font-weight:bold;color:#c62828;">{{ p.inasistencias }}</td>
+    </tr>
+    {% endfor %}
+  </tbody>
+</table>
+{% endif %}
+
+{{ m.cta_button(app_url, 'Ver detalle completo en la App', '#2e7d32') }}
+
+<p style="font-size:12px;color:#777;margin-top:24px;">
+  Este reporte se genera automáticamente cada lunes a las 7:00 AM (COT).
+</p>
+{% endblock %}

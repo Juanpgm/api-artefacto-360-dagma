@@ -1,0 +1,15 @@
+{% extends "_base.html" %}
+{% import "_macros.html" as m %}
+
+{% block content %}
+<p>Estimado/a <strong>{{ nombre }}</strong>,</p>
+<p>Le informamos que ha sido <strong>desasignado/a</strong> de la siguiente actividad ambiental.
+   <strong>No es necesario que se presente</strong> al punto de encuentro.</p>
+<h3 style="color:#c62828;margin:18px 0 8px;">Detalles de la Actividad</h3>
+{{ m.activity_details_table(actividad) }}
+<p style="margin-top:16px;">
+  Si tiene alguna duda, comuníquese con el líder:<br>
+  <strong>{{ actividad.get('lider_actividad', 'N/A') }}</strong> &mdash;
+  Tel: <strong>{{ actividad.get('telefono', 'N/A') }}</strong>
+</p>
+{% endblock %}

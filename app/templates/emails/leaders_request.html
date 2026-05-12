@@ -1,0 +1,23 @@
+{% extends "_base.html" %}
+{% import "_macros.html" as m %}
+
+{% block content %}
+{% set saludo = ('Estimado/a líder ' ~ leader_name) if leader_name else 'Estimado/a líder' %}
+{% set grupos = (actividad.get('grupos_requeridos') or []) | join(', ') or 'Todos los grupos' %}
+<p>{{ saludo }},</p>
+<p>Se ha programado una nueva actividad ambiental en el sistema
+   <strong>Artefacto 360 DAGMA</strong> que requiere su atención.</p>
+<p><strong>Grupos requeridos:</strong> {{ grupos }}</p>
+<p>Por favor, ingrese a la aplicación y asigne el personal disponible de su grupo
+   para participar en esta actividad.</p>
+<h3 style="color:#1b5e20;margin:18px 0 8px;">Detalles de la Actividad</h3>
+{{ m.activity_details_table(actividad) }}
+{{ m.calendar_button(actividad) }}
+{{ m.maps_button(actividad) }}
+{{ m.cta_button(app_url, 'Ir a la App — Asignar Personal', '#2e7d32') }}
+<p style="font-size:13px;color:#666;margin-top:16px;">
+  Si tiene dudas, comuníquese con el coordinador:<br>
+  <strong>{{ actividad.get('lider_actividad', 'N/A') }}</strong>
+  &mdash; Tel: <strong>{{ actividad.get('telefono', 'N/A') }}</strong>
+</p>
+{% endblock %}

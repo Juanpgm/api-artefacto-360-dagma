@@ -1,0 +1,41 @@
+{% extends "_base.html" %}
+{% import "_macros.html" as m %}
+
+{% block content %}
+<p>Estimado/a <strong>{{ leader_name | default('Líder') }}</strong>,</p>
+<p>Se ha actualizado el personal asignado a una actividad bajo su liderazgo:</p>
+<h3 style="color:#1565c0;margin:18px 0 8px;">Resumen del cambio</h3>
+<table style="border-collapse:collapse;width:100%;font-family:Arial,sans-serif;font-size:14px;margin:8px 0 16px;">
+  <tr>
+    <td style="padding:8px 12px;background:#e8f5e9;font-weight:bold;width:50%;border-bottom:1px solid #eee;">
+      Agregados ({{ agregados | length }})
+    </td>
+    <td style="padding:8px 12px;background:#ffebee;font-weight:bold;width:50%;border-bottom:1px solid #eee;">
+      Removidos ({{ removidos | length }})
+    </td>
+  </tr>
+  <tr>
+    <td style="padding:8px 12px;vertical-align:top;border-bottom:1px solid #eee;">
+      {% if agregados %}
+      <ul style="margin:0;padding-left:18px;">
+        {% for p in agregados %}
+        <li>{{ p.get('nombre_completo', p.get('email', '—')) }}{% if p.get('grupo') %} <span style="color:#777;">({{ p.get('grupo') }})</span>{% endif %}</li>
+        {% endfor %}
+      </ul>
+      {% else %}<em>Ninguno</em>{% endif %}
+    </td>
+    <td style="padding:8px 12px;vertical-align:top;border-bottom:1px solid #eee;">
+      {% if removidos %}
+      <ul style="margin:0;padding-left:18px;">
+        {% for p in removidos %}
+        <li>{{ p.get('nombre_completo', p.get('email', '—')) }}{% if p.get('grupo') %} <span style="color:#777;">({{ p.get('grupo') }})</span>{% endif %}</li>
+        {% endfor %}
+      </ul>
+      {% else %}<em>Ninguno</em>{% endif %}
+    </td>
+  </tr>
+</table>
+<h3 style="color:#1565c0;margin:18px 0 8px;">Actividad</h3>
+{{ m.activity_details_table(actividad) }}
+{{ m.cta_button(app_url, 'Ver actividad en la App', '#1565c0') }}
+{% endblock %}

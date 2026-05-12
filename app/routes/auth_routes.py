@@ -1,7 +1,7 @@
 ﻿"""
 Rutas de Administración y Control de Accesos
 """
-from fastapi import APIRouter, HTTPException, Depends, Form, Request, UploadFile, File
+from fastapi import APIRouter, HTTPException, Depends, Form, Request, UploadFile, File, BackgroundTasks
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from pydantic import BaseModel, EmailStr
 from typing import Optional, List
@@ -16,6 +16,10 @@ from app.firebase_config import auth_client, db
 from app.models.roles import Role, can_assign_role, normalize_role
 from app.deps.authz import get_current_user, require_min_role, CurrentUser
 from app.utils.firestore_async import run_blocking, stream_to_list
+from app.services.gmail_service import (
+    send_role_change_email,
+    send_grupo_change_email,
+)
 from slowapi import Limiter
 from slowapi.util import get_remote_address
 
@@ -597,6 +601,7 @@ async def delete_user(uid: str, permanent: bool = False):
 async def change_user_role(
     uid: str,
     body: ChangeRoleRequest,
+    background_tasks: BackgroundTasks = None,
     current_user: CurrentUser = Depends(require_min_role(Role.ADMINISTRADOR)),
 ):
     """
@@ -632,6 +637,21 @@ async def change_user_role(
         "timestamp": datetime.now(timezone.utc),
     })
     logger.info(f"Rol cambiado: uid={uid} {old_role}->{new_role} por actor={current_user.uid}")
+    # Notificar al usuario por correo (best-effort, background).
+    target_email = (target_data.get("email") or "").strip()
+    target_name = (target_data.get("full_name") or target_data.get("nombre_completo") or "").strip()
+    actor_name = current_user.full_name if hasattr(current_user, "full_name") else current_user.uid
+    if target_email and "@" in target_email:
+        try:
+            if background_tasks is not None:
+                background_tasks.add_task(
+                    send_role_change_email, target_email, target_name,
+                    old_role, new_role, actor_name,
+                )
+            else:
+                send_role_change_email(target_email, target_name, old_role, new_role, actor_name)
+        except Exception as e:
+            logger.warning(f"[EMAIL] Error agendando notificación cambio de rol a {target_email}: {e}")
     return {
         "success": True,
         "uid": uid,
@@ -647,6 +667,7 @@ async def change_user_role(
 async def change_user_grupo(
     uid: str,
     body: ChangeGrupoRequest,
+    background_tasks: BackgroundTasks = None,
     current_user: CurrentUser = Depends(require_min_role(Role.ADMINISTRADOR)),
 ):
     """Cambia el grupo de un usuario. Requiere nivel administrador o superior."""
@@ -663,6 +684,21 @@ async def change_user_grupo(
     auth_client.set_custom_user_claims(uid, {"role": role, "grupo": grupo_normalizado})
     auth_client.revoke_refresh_tokens(uid)
     logger.info(f"Grupo cambiado: uid={uid} {old_grupo}->{grupo_normalizado} por actor={current_user.uid}")
+    # Notificar al usuario por correo (best-effort, background).
+    target_email = (target_data.get("email") or "").strip()
+    target_name = (target_data.get("full_name") or target_data.get("nombre_completo") or "").strip()
+    actor_name = current_user.full_name if hasattr(current_user, "full_name") else current_user.uid
+    if target_email and "@" in target_email:
+        try:
+            if background_tasks is not None:
+                background_tasks.add_task(
+                    send_grupo_change_email, target_email, target_name,
+                    old_grupo or "", grupo_normalizado or "", actor_name,
+                )
+            else:
+                send_grupo_change_email(target_email, target_name, old_grupo or "", grupo_normalizado or "", actor_name)
+        except Exception as e:
+            logger.warning(f"[EMAIL] Error agendando notificación cambio de grupo a {target_email}: {e}")
     return {
         "success": True,
         "uid": uid,

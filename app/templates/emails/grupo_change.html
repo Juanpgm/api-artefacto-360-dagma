@@ -1,0 +1,21 @@
+{% extends "_base.html" %}
+{% import "_macros.html" as m %}
+
+{% block content %}
+<p>Estimado/a <strong>{{ nombre | default('Usuario') }}</strong>,</p>
+<p>Le informamos que su <strong>grupo</strong> asignado en el sistema <strong>Artefacto 360 DAGMA</strong>
+   ha sido modificado.</p>
+{{ m.kv_table([
+  ('Grupo anterior', old_grupo | default('—')),
+  ('Grupo nuevo', '<strong>' ~ (new_grupo | default('—')) ~ '</strong>'),
+  ('Actualizado por', actor_name | default('Administrador')),
+  ('Fecha del cambio', timestamp | default('')),
+]) }}
+<p style="background:#fff3cd;border-left:4px solid #ffa000;padding:12px 16px;margin:16px 0;border-radius:4px;">
+  <strong>Acción requerida:</strong> debe <strong>cerrar sesión y volver a iniciar sesión</strong>
+  para que el cambio de grupo tome efecto.
+</p>
+<p style="font-size:13px;color:#666;">
+  Si tiene dudas, contacte a la Central Operativa de DAGMA o al líder de su nuevo grupo.
+</p>
+{% endblock %}

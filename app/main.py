@@ -39,7 +39,8 @@ from app.routes import (
     firebase_routes,
     artefacto_360_routes,
     auth_routes,
-    seguimiento_routes
+    seguimiento_routes,
+    notifications_routes
 )
 
 # Crear aplicación FastAPI
@@ -106,6 +107,7 @@ app.include_router(firebase_routes.router)
 app.include_router(artefacto_360_routes.router)
 app.include_router(auth_routes.router)
 app.include_router(seguimiento_routes.router)
+app.include_router(notifications_routes.router)
 
 # Manejador de errores global
 @app.exception_handler(Exception)

@@ -9,11 +9,15 @@ import os
 import base64
 import smtplib
 import logging
+import hashlib
+from datetime import datetime, timezone, timedelta
+from pathlib import Path
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 from email.mime.base import MIMEBase
 from email import encoders
 
+from jinja2 import Environment, FileSystemLoader, select_autoescape
 from google.oauth2.credentials import Credentials
 from google.auth.transport.requests import Request
 from googleapiclient.discovery import build
@@ -22,6 +26,124 @@ from googleapiclient.errors import HttpError
 from app.services.ical_service import generate_ics
 
 logger = logging.getLogger(__name__)
+
+# ---------------------------------------------------------------------------
+# Jinja2 environment compartido para plantillas de correo.
+# Las plantillas viven en back/app/templates/emails/ con _base.html + _macros.html.
+# ---------------------------------------------------------------------------
+_TEMPLATES_DIR = Path(__file__).resolve().parent.parent / 'templates' / 'emails'
+_jinja_env = Environment(
+    loader=FileSystemLoader(str(_TEMPLATES_DIR)),
+    autoescape=select_autoescape(['html', 'xml']),
+    trim_blocks=True,
+    lstrip_blocks=True,
+)
+
+
+def _render_template(name: str, context: dict) -> str:
+    """Renderiza una plantilla Jinja2 ubicada en templates/emails/<name>."""
+    return _jinja_env.get_template(name).render(**context)
+
+
+# ---------------------------------------------------------------------------
+# Cuota / monitoreo de envío (Gmail ~100 correos/día por cuenta SMTP).
+# Registramos cada envío en `notifications_log` y disparamos alertas a admin
+# cuando se cruzan los umbrales 80% / 95%.
+# ---------------------------------------------------------------------------
+DAILY_EMAIL_QUOTA = int(os.getenv('EMAIL_DAILY_QUOTA', '100'))
+QUOTA_WARN_THRESHOLD = float(os.getenv('EMAIL_QUOTA_WARN', '0.80'))
+QUOTA_BLOCK_THRESHOLD = float(os.getenv('EMAIL_QUOTA_BLOCK', '0.95'))
+
+
+def _get_db():
+    """Obtiene el cliente Firestore (lazy import para no romper tests sin Firebase)."""
+    try:
+        from app.firebase_config import db  # noqa: WPS433
+        return db
+    except Exception as e:  # pragma: no cover
+        logger.debug(f"[QUOTA] Firestore no disponible: {e}")
+        return None
+
+
+def _count_sent_last_24h() -> int:
+    db = _get_db()
+    if db is None:
+        return 0
+    try:
+        since = datetime.now(timezone.utc) - timedelta(hours=24)
+        q = (
+            db.collection('notifications_log')
+            .where('sent_at', '>=', since)
+            .where('status', '==', 'sent')
+        )
+        return sum(1 for _ in q.stream())
+    except Exception as e:  # pragma: no cover
+        logger.warning(f"[QUOTA] Error contando envíos 24h: {e}")
+        return 0
+
+
+def _log_notification(to: str, subject: str, template: str, status: str, error: str = '') -> None:
+    db = _get_db()
+    if db is None:
+        return
+    try:
+        db.collection('notifications_log').add({
+            'to': to,
+            'subject': subject,
+            'template': template,
+            'status': status,
+            'error': error,
+            'sent_at': datetime.now(timezone.utc),
+        })
+    except Exception as e:  # pragma: no cover
+        logger.debug(f"[QUOTA] Error registrando notificación: {e}")
+
+
+def _admin_alert_email() -> str:
+    return os.getenv('ADMIN_ALERT_EMAIL', os.getenv('SMTP_USER', ''))
+
+
+def _maybe_alert_quota(count: int) -> None:
+    """Si el conteo cruzó el umbral del 80% en las últimas 24h, alerta una sola vez."""
+    db = _get_db()
+    if db is None:
+        return
+    threshold = int(DAILY_EMAIL_QUOTA * QUOTA_WARN_THRESHOLD)
+    if count < threshold:
+        return
+    today = datetime.now(timezone.utc).strftime('%Y-%m-%d')
+    alert_key = f"quota-warn-{today}"
+    try:
+        doc_ref = db.collection('notifications_alerts').document(alert_key)
+        if doc_ref.get().exists:
+            return  # ya alertado hoy
+        doc_ref.set({
+            'kind': 'quota_warning',
+            'count_24h': count,
+            'quota': DAILY_EMAIL_QUOTA,
+            'created_at': datetime.now(timezone.utc),
+        })
+        admin = _admin_alert_email()
+        if admin:
+            html = _render_template('generic_announcement.html', {
+                'subject': 'Aviso de cuota de correo DAGMA',
+                'header_color': '#f9a825',
+                'header_title': 'DAGMA — Cuota de correo al 80%',
+                'header_subtitle': 'Sistema Artefacto 360',
+                'priority': 'warning',
+                'message_html': (
+                    f'<p>Se han enviado <strong>{count}</strong> correos en las últimas 24 horas '
+                    f'(cuota diaria: <strong>{DAILY_EMAIL_QUOTA}</strong>).</p>'
+                    '<p>Si se alcanza el 95% los envíos no críticos serán bloqueados para evitar '
+                    'que Gmail suspenda la cuenta.</p>'
+                ),
+                'cta_url': '',
+                'cta_label': '',
+            })
+            # Bypass quota check para esta alerta administrativa.
+            _send_raw_email(admin, '[DAGMA] Cuota de correo al 80%', html, template='quota_warning')
+    except Exception as e:  # pragma: no cover
+        logger.warning(f"[QUOTA] Error generando alerta: {e}")
 
 
 def _get_gmail_service():
@@ -83,7 +205,12 @@ def _send_via_gmail_api(msg: MIMEMultipart, to: str) -> bool:
 
 
 def _send_via_smtp(msg: MIMEMultipart, to: str) -> bool:
-    """Intenta enviar usando SMTP (App Password). Retorna True si tuvo éxito."""
+    """
+    Intenta enviar usando SMTP (App Password). Autodetecta el modo de cifrado:
+    - Puerto 465 → SMTP_SSL (cifrado implícito desde el handshake).
+    - Puerto 587 (o cualquier otro) → SMTP + STARTTLS.
+    Retorna True si tuvo éxito.
+    """
     smtp_host = os.getenv('SMTP_HOST', '')
     smtp_port = int(os.getenv('SMTP_PORT', '587'))
     smtp_user = os.getenv('SMTP_USER', '')
@@ -94,49 +221,70 @@ def _send_via_smtp(msg: MIMEMultipart, to: str) -> bool:
         return False
 
     try:
-        with smtplib.SMTP(smtp_host, smtp_port, timeout=20) as server:
-            server.ehlo()
-            server.starttls()
-            server.login(smtp_user, smtp_password)
-            server.sendmail(smtp_user, [to], msg.as_string())
-        logger.info(f"[SMTP] Email enviado a {to}")
+        if smtp_port == 465:
+            with smtplib.SMTP_SSL(smtp_host, smtp_port, timeout=20) as server:
+                server.login(smtp_user, smtp_password)
+                server.sendmail(smtp_user, [to], msg.as_string())
+        else:
+            with smtplib.SMTP(smtp_host, smtp_port, timeout=20) as server:
+                server.ehlo()
+                server.starttls()
+                server.ehlo()
+                server.login(smtp_user, smtp_password)
+                server.sendmail(smtp_user, [to], msg.as_string())
+        logger.info(f"[SMTP] Email enviado a {to} (port={smtp_port})")
         return True
     except Exception as e:
-        logger.error(f"[SMTP] Error enviando a {to}: {e}")
+        logger.error(f"[SMTP] Error enviando a {to} (host={smtp_host}, port={smtp_port}): {e}")
         return False
 
 
-def _send_email(to: str, subject: str, html_body: str, ics_bytes: bytes = None) -> bool:
-    """
-    Envía un correo con adjunto iCal opcional.
-    Intenta primero Gmail API (OAuth2); si no está configurada, usa SMTP como fallback.
-    Retorna True si tuvo éxito, False en caso contrario (nunca propaga excepciones).
-    """
+def _send_raw_email(to: str, subject: str, html_body: str,
+                    ics_bytes: bytes = None, template: str = '') -> bool:
+    """Envío directo sin chequeo de cuota (uso interno y para alertas)."""
     sender_name = os.getenv('SMTP_SENDER_NAME', 'DAGMA Artefacto 360')
-    # Gmail API usa GMAIL_SENDER; SMTP usa SMTP_USER como remitente
     sender = os.getenv('GMAIL_SENDER') or os.getenv('SMTP_USER', '')
-
     try:
         msg = _build_mime_message(sender, sender_name, to, subject, html_body, ics_bytes)
-
-        # Intentar Gmail API primero
         gmail_configured = bool(
             os.getenv('GMAIL_CLIENT_ID') and
             os.getenv('GMAIL_CLIENT_SECRET') and
             os.getenv('GMAIL_REFRESH_TOKEN')
         )
+        ok = False
         if gmail_configured:
-            result = _send_via_gmail_api(msg, to)
-            if result:
-                return True
-            logger.warning(f"[EMAIL] Gmail API falló para {to}, intentando SMTP...")
-
-        # Fallback: SMTP
-        return _send_via_smtp(msg, to)
-
+            ok = _send_via_gmail_api(msg, to)
+            if not ok:
+                logger.warning(f"[EMAIL] Gmail API falló para {to}, intentando SMTP...")
+        if not ok:
+            ok = _send_via_smtp(msg, to)
+        _log_notification(to, subject, template, 'sent' if ok else 'failed')
+        return ok
     except Exception as e:
         logger.error(f"[EMAIL] Error inesperado enviando a {to}: {e}")
+        _log_notification(to, subject, template, 'failed', error=str(e))
         return False
+
+
+def _send_email(to: str, subject: str, html_body: str,
+                ics_bytes: bytes = None, template: str = '') -> bool:
+    """
+    Envía un correo con adjunto iCal opcional y control de cuota diaria.
+    Si se supera el 95% de la cuota diaria, NO envía y registra el bloqueo.
+    Si se supera el 80%, dispara una alerta admin (dedup por día).
+    Retorna True si tuvo éxito, False en caso contrario (nunca propaga excepciones).
+    """
+    count = _count_sent_last_24h()
+    if count >= int(DAILY_EMAIL_QUOTA * QUOTA_BLOCK_THRESHOLD):
+        logger.error(
+            f"[QUOTA] Bloqueo de envío a {to}: {count}/{DAILY_EMAIL_QUOTA} "
+            f"correos en las últimas 24h (≥{int(QUOTA_BLOCK_THRESHOLD*100)}%)."
+        )
+        _log_notification(to, subject, template, 'blocked_quota')
+        _maybe_alert_quota(count)
+        return False
+    _maybe_alert_quota(count)
+    return _send_raw_email(to, subject, html_body, ics_bytes=ics_bytes, template=template)
 
 
 def _google_maps_url(actividad_data: dict) -> str:
@@ -202,45 +350,22 @@ def _maps_button(actividad_data: dict) -> str:
 
 
 def send_activity_confirmation_email(coordinator_email: str, actividad_data: dict) -> bool:
-    """
-    Envía correo de confirmación al coordinador cuando se programa una actividad.
-    Incluye adjunto .ics para agregar al calendario.
-    Retorna True si se envió correctamente, False en caso de error (no propaga excepciones).
-    """
+    """Confirmación al coordinador cuando se programa una actividad (con .ics adjunto)."""
     try:
         fecha = actividad_data.get('fecha_actividad', '')
-        html = f"""
-        <html><body style="font-family:Arial,sans-serif;color:#333;max-width:620px;margin:auto;padding:0;">
-          <div style="background:#2e7d32;padding:24px;text-align:center;">
-            <h2 style="color:white;margin:0;">DAGMA — Actividad Ambiental Programada</h2>
-          </div>
-          <div style="padding:28px;">
-            <p>Estimado/a coordinador/a,</p>
-            <p>La siguiente actividad ambiental ha sido registrada exitosamente en el sistema
-               <strong>Artefacto 360 DAGMA</strong>.</p>
-            <h3 style="color:#2e7d32;margin-bottom:8px;">Detalles de la Actividad</h3>
-            {_activity_details_table(actividad_data)}
-            {_calendar_button(actividad_data)}
-            {_maps_button(actividad_data)}
-            <p style="margin-top:24px;">El archivo adjunto <strong>actividad_dagma.ics</strong> le permite
-               agregar esta actividad directamente a Google Calendar, Outlook o Apple Calendar.</p>
-            <hr style="border:none;border-top:1px solid #eee;margin:28px 0;">
-            <p style="font-size:12px;color:#888;margin:0;">
-              Mensaje generado automáticamente por el sistema Artefacto 360 DAGMA.<br>
-              DAGMA — Departamento Administrativo de Gestión del Medio Ambiente, Santiago de Cali.
-            </p>
-          </div>
-        </body></html>
-        """
+        subject = f"Actividad Ambiental Programada — {fecha}"
+        html = _render_template('activity_confirmation.html', {
+            'subject': subject,
+            'header_color': '#2e7d32',
+            'header_title': 'DAGMA — Actividad Ambiental Programada',
+            'header_subtitle': '',
+            'actividad': actividad_data,
+        })
         ics = generate_ics(actividad_data)
-        return _send_email(
-            to=coordinator_email,
-            subject=f"Actividad Ambiental Programada — {fecha}",
-            html_body=html,
-            ics_bytes=ics or None,
-        )
+        return _send_email(coordinator_email, subject, html,
+                           ics_bytes=ics or None, template='activity_confirmation')
     except Exception as e:
-        logger.error(f"[SMTP] Error enviando confirmación a {coordinator_email}: {e}")
+        logger.error(f"[EMAIL] Error enviando confirmación a {coordinator_email}: {e}")
         return False
 
 
@@ -250,55 +375,24 @@ def send_assignment_notification_email(
     grupo: str,
     actividad_data: dict
 ) -> bool:
-    """
-    Envía notificación de asignación a una persona del personal.
-    Incluye adjunto .ics para agregar al calendario.
-    Retorna True si se envió correctamente, False en caso de error (no propaga excepciones).
-    """
+    """Notificación de asignación al personal (con .ics adjunto)."""
     try:
-        lider = actividad_data.get('lider_actividad', 'N/A')
-        telefono = actividad_data.get('telefono', 'N/A')
         fecha = actividad_data.get('fecha_actividad', '')
-
-        html = f"""
-        <html><body style="font-family:Arial,sans-serif;color:#333;max-width:620px;margin:auto;padding:0;">
-          <div style="background:#1565c0;padding:24px;text-align:center;">
-            <h2 style="color:white;margin:0;">DAGMA — Asignación a Actividad Ambiental</h2>
-          </div>
-          <div style="padding:28px;">
-            <p>Estimado/a <strong>{nombre}</strong>,</p>
-            <p>Ha sido asignado/a como integrante del equipo <strong>{grupo}</strong> para participar
-               en la siguiente actividad ambiental de DAGMA.</p>
-            <h3 style="color:#1565c0;margin-bottom:8px;">Detalles de la Actividad</h3>
-            {_activity_details_table(actividad_data)}
-            {_calendar_button(actividad_data)}
-            {_maps_button(actividad_data)}
-            <p style="margin-top:24px;">
-              Abra el archivo adjunto <strong>actividad_dagma.ics</strong> para agregar esta actividad
-              a su Google Calendar, Outlook o Apple Calendar con recordatorio automático.
-            </p>
-            <p>
-              Por favor, confírmele su asistencia al líder:<br>
-              <strong>{lider}</strong> — Tel: <strong>{telefono}</strong>
-            </p>
-            <p>Preséntese puntualmente en el punto de encuentro indicado.</p>
-            <hr style="border:none;border-top:1px solid #eee;margin:28px 0;">
-            <p style="font-size:12px;color:#888;margin:0;">
-              Mensaje generado automáticamente por el sistema Artefacto 360 DAGMA.<br>
-              DAGMA — Departamento Administrativo de Gestión del Medio Ambiente, Santiago de Cali.
-            </p>
-          </div>
-        </body></html>
-        """
+        subject = f"Asignación Actividad Ambiental DAGMA — {fecha}"
+        html = _render_template('assignment_notification.html', {
+            'subject': subject,
+            'header_color': '#1565c0',
+            'header_title': 'DAGMA — Asignación a Actividad Ambiental',
+            'header_subtitle': '',
+            'nombre': nombre,
+            'grupo': grupo,
+            'actividad': actividad_data,
+        })
         ics = generate_ics(actividad_data)
-        return _send_email(
-            to=person_email,
-            subject=f"Asignación Actividad Ambiental DAGMA — {fecha}",
-            html_body=html,
-            ics_bytes=ics or None,
-        )
+        return _send_email(person_email, subject, html,
+                           ics_bytes=ics or None, template='assignment_notification')
     except Exception as e:
-        logger.error(f"[SMTP] Error enviando notificación a {person_email}: {e}")
+        logger.error(f"[EMAIL] Error enviando notificación a {person_email}: {e}")
         return False
 
 
@@ -306,63 +400,27 @@ def send_leaders_notification_email(
     leader_email: str,
     leader_name: str,
     actividad_data: dict,
-    app_url: str = "https://dagma-360-capture.vercel.app",
+    app_url: str = None,
 ) -> bool:
-    """
-    Notifica a un líder de grupo sobre una nueva actividad programada, solicitando asignación de personal.
-    Retorna True si se envió correctamente, False en caso de error (no propaga excepciones).
-    """
+    """Notifica al líder de un grupo sobre nueva actividad que requiere asignación."""
     try:
         fecha = actividad_data.get('fecha_actividad', '')
-        grupos = ', '.join(actividad_data.get('grupos_requeridos') or []) or 'Todos los grupos'
-        saludo = f"Estimado/a líder {leader_name}" if leader_name else "Estimado/a líder"
-
-        html = f"""
-        <html><body style="font-family:Arial,sans-serif;color:#333;max-width:620px;margin:auto;padding:0;">
-          <div style="background:#1b5e20;padding:24px;text-align:center;">
-            <h2 style="color:white;margin:0;">DAGMA — Nueva Actividad Programada</h2>
-            <p style="color:#a5d6a7;margin:8px 0 0;">Se requiere asignación de personal</p>
-          </div>
-          <div style="padding:28px;">
-            <p>{saludo},</p>
-            <p>Se ha programado una nueva actividad ambiental en el sistema
-               <strong>Artefacto 360 DAGMA</strong> que requiere su atención.</p>
-            <p><strong>Grupos requeridos:</strong> {grupos}</p>
-            <p>Por favor, ingrese a la aplicación y asigne el personal disponible de su grupo
-               para participar en esta actividad.</p>
-            <h3 style="color:#1b5e20;margin-bottom:8px;">Detalles de la Actividad</h3>
-            {_activity_details_table(actividad_data)}
-            {_calendar_button(actividad_data)}
-            {_maps_button(actividad_data)}
-            <p style="margin-top:24px;text-align:center;">
-              <a href="{app_url}" style="background:#2e7d32;color:white;padding:12px 32px;
-                 text-decoration:none;border-radius:4px;font-family:Arial,sans-serif;font-size:15px;
-                 font-weight:bold;display:inline-block;">
-                Ir a la App — Asignar Personal
-              </a>
-            </p>
-            <p style="font-size:13px;color:#666;margin-top:16px;">
-              Si tiene dudas, comuníquese con el coordinador:<br>
-              <strong>{actividad_data.get('lider_actividad', 'N/A')}</strong>
-              — Tel: <strong>{actividad_data.get('telefono', 'N/A')}</strong>
-            </p>
-            <hr style="border:none;border-top:1px solid #eee;margin:28px 0;">
-            <p style="font-size:12px;color:#888;margin:0;">
-              Mensaje generado automáticamente por el sistema Artefacto 360 DAGMA.<br>
-              DAGMA — Departamento Administrativo de Gestión del Medio Ambiente, Santiago de Cali.
-            </p>
-          </div>
-        </body></html>
-        """
+        subject = f"Nueva Actividad DAGMA — Asignar Personal — {fecha}"
+        app_url = app_url or os.getenv('FRONTEND_URL', 'https://dagma-360-capture.vercel.app')
+        html = _render_template('leaders_request.html', {
+            'subject': subject,
+            'header_color': '#1b5e20',
+            'header_title': 'DAGMA — Nueva Actividad Programada',
+            'header_subtitle': 'Se requiere asignación de personal',
+            'leader_name': leader_name,
+            'actividad': actividad_data,
+            'app_url': app_url,
+        })
         ics = generate_ics(actividad_data)
-        return _send_email(
-            to=leader_email,
-            subject=f"Nueva Actividad DAGMA — Asignar Personal — {fecha}",
-            html_body=html,
-            ics_bytes=ics or None,
-        )
+        return _send_email(leader_email, subject, html,
+                           ics_bytes=ics or None, template='leaders_request')
     except Exception as e:
-        logger.error(f"[GMAIL] Error enviando notificación a líder {leader_email}: {e}")
+        logger.error(f"[EMAIL] Error enviando notificación a líder {leader_email}: {e}")
         return False
 
 
@@ -371,44 +429,251 @@ def send_removal_notification_email(
     nombre: str,
     actividad_data: dict
 ) -> bool:
-    """
-    Envía notificación de desasignación a una persona del personal.
-    Informa que ya no necesita presentarse a la actividad.
-    Retorna True si se envió correctamente, False en caso de error (no propaga excepciones).
-    """
+    """Notificación de desasignación al personal removido."""
     try:
         fecha = actividad_data.get('fecha_actividad', '')
-        lider = actividad_data.get('lider_actividad', 'N/A')
-        telefono = actividad_data.get('telefono', 'N/A')
-
-        html = f"""
-        <html><body style="font-family:Arial,sans-serif;color:#333;max-width:620px;margin:auto;padding:0;">
-          <div style="background:#c62828;padding:24px;text-align:center;">
-            <h2 style="color:white;margin:0;">DAGMA — Desasignación de Actividad Ambiental</h2>
-          </div>
-          <div style="padding:28px;">
-            <p>Estimado/a <strong>{nombre}</strong>,</p>
-            <p>Le informamos que ha sido <strong>desasignado/a</strong> de la siguiente actividad ambiental.
-               <strong>No es necesario que se presente</strong> al punto de encuentro.</p>
-            <h3 style="color:#c62828;margin-bottom:8px;">Detalles de la Actividad</h3>
-            {_activity_details_table(actividad_data)}
-            <p style="margin-top:24px;">
-              Si tiene alguna duda, comuníquese con el líder:<br>
-              <strong>{lider}</strong> — Tel: <strong>{telefono}</strong>
-            </p>
-            <hr style="border:none;border-top:1px solid #eee;margin:28px 0;">
-            <p style="font-size:12px;color:#888;margin:0;">
-              Mensaje generado automáticamente por el sistema Artefacto 360 DAGMA.<br>
-              DAGMA — Departamento Administrativo de Gestión del Medio Ambiente, Santiago de Cali.
-            </p>
-          </div>
-        </body></html>
-        """
-        return _send_email(
-            to=person_email,
-            subject=f"Desasignación de Actividad Ambiental DAGMA — {fecha}",
-            html_body=html,
-        )
+        subject = f"Desasignación de Actividad Ambiental DAGMA — {fecha}"
+        html = _render_template('removal_notification.html', {
+            'subject': subject,
+            'header_color': '#c62828',
+            'header_title': 'DAGMA — Desasignación de Actividad Ambiental',
+            'header_subtitle': '',
+            'nombre': nombre,
+            'actividad': actividad_data,
+        })
+        return _send_email(person_email, subject, html, template='removal_notification')
     except Exception as e:
-        logger.error(f"[SMTP] Error enviando desasignación a {person_email}: {e}")
+        logger.error(f"[EMAIL] Error enviando desasignación a {person_email}: {e}")
         return False
+
+
+# ===========================================================================
+# Nuevos envíos (Fase 3): líder de actividad, resumen al líder, cambios de rol/
+# grupo, broadcast genérico, reporte semanal y health check.
+# ===========================================================================
+
+def send_activity_leader_assigned_email(
+    leader_email: str,
+    leader_name: str,
+    actividad_data: dict,
+    app_url: str = None,
+) -> bool:
+    """Notifica a la persona designada como LÍDER de una actividad específica."""
+    try:
+        fecha = actividad_data.get('fecha_actividad', '')
+        subject = f"Asignación como Líder de Actividad DAGMA — {fecha}"
+        app_url = app_url or os.getenv('FRONTEND_URL', 'https://dagma-360-capture.vercel.app')
+        html = _render_template('activity_leader_assigned.html', {
+            'subject': subject,
+            'header_color': '#2e7d32',
+            'header_title': 'DAGMA — Designación como Líder de Actividad',
+            'header_subtitle': '',
+            'leader_name': leader_name,
+            'actividad': actividad_data,
+            'app_url': app_url,
+        })
+        ics = generate_ics(actividad_data)
+        return _send_email(leader_email, subject, html,
+                           ics_bytes=ics or None, template='activity_leader_assigned')
+    except Exception as e:
+        logger.error(f"[EMAIL] Error enviando designación líder a {leader_email}: {e}")
+        return False
+
+
+def send_assignment_summary_leader_email(
+    leader_email: str,
+    leader_name: str,
+    actividad_data: dict,
+    agregados: list,
+    removidos: list,
+    app_url: str = None,
+) -> bool:
+    """CC al líder con el delta (agregados/removidos) tras una asignación/desasignación."""
+    try:
+        if not agregados and not removidos:
+            return True  # nada que reportar
+        fecha = actividad_data.get('fecha_actividad', '')
+        subject = f"Resumen de asignación — Actividad DAGMA {fecha}"
+        app_url = app_url or os.getenv('FRONTEND_URL', 'https://dagma-360-capture.vercel.app')
+        html = _render_template('assignment_summary_leader.html', {
+            'subject': subject,
+            'header_color': '#1565c0',
+            'header_title': 'DAGMA — Resumen de Asignación',
+            'header_subtitle': fecha,
+            'leader_name': leader_name,
+            'actividad': actividad_data,
+            'agregados': agregados or [],
+            'removidos': removidos or [],
+            'app_url': app_url,
+        })
+        return _send_email(leader_email, subject, html, template='assignment_summary_leader')
+    except Exception as e:
+        logger.error(f"[EMAIL] Error enviando resumen líder a {leader_email}: {e}")
+        return False
+
+
+def send_role_change_email(
+    user_email: str,
+    nombre: str,
+    old_role: str,
+    new_role: str,
+    actor_name: str = 'Administrador',
+) -> bool:
+    """Notifica al usuario que su rol fue modificado por un administrador."""
+    try:
+        subject = 'Cambio de rol en Artefacto 360 DAGMA'
+        html = _render_template('role_change.html', {
+            'subject': subject,
+            'header_color': '#f9a825',
+            'header_title': 'DAGMA — Cambio de Rol',
+            'header_subtitle': '',
+            'nombre': nombre,
+            'old_role': old_role,
+            'new_role': new_role,
+            'actor_name': actor_name,
+            'timestamp': datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M UTC'),
+        })
+        return _send_email(user_email, subject, html, template='role_change')
+    except Exception as e:
+        logger.error(f"[EMAIL] Error enviando cambio de rol a {user_email}: {e}")
+        return False
+
+
+def send_grupo_change_email(
+    user_email: str,
+    nombre: str,
+    old_grupo: str,
+    new_grupo: str,
+    actor_name: str = 'Administrador',
+) -> bool:
+    """Notifica al usuario que su grupo fue modificado por un administrador."""
+    try:
+        subject = 'Cambio de grupo en Artefacto 360 DAGMA'
+        html = _render_template('grupo_change.html', {
+            'subject': subject,
+            'header_color': '#1565c0',
+            'header_title': 'DAGMA — Cambio de Grupo',
+            'header_subtitle': '',
+            'nombre': nombre,
+            'old_grupo': old_grupo,
+            'new_grupo': new_grupo,
+            'actor_name': actor_name,
+            'timestamp': datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M UTC'),
+        })
+        return _send_email(user_email, subject, html, template='grupo_change')
+    except Exception as e:
+        logger.error(f"[EMAIL] Error enviando cambio de grupo a {user_email}: {e}")
+        return False
+
+
+def send_broadcast_email(
+    to: str,
+    subject: str,
+    message_html: str,
+    priority: str = 'info',
+    cta_url: str = '',
+    cta_label: str = '',
+) -> bool:
+    """Envía un anuncio genérico (Comunicados) a un destinatario.
+
+    priority ∈ {'info','warning','urgent'} controla el color del header.
+    """
+    color_map = {'info': '#2e7d32', 'warning': '#f9a825', 'urgent': '#c62828'}
+    header_color = color_map.get(priority, '#2e7d32')
+    try:
+        html = _render_template('generic_announcement.html', {
+            'subject': subject,
+            'header_color': header_color,
+            'header_title': f'DAGMA — {subject}',
+            'header_subtitle': '',
+            'priority': priority,
+            'message_html': message_html,
+            'cta_url': cta_url,
+            'cta_label': cta_label,
+        })
+        return _send_email(to, subject, html, template='broadcast')
+    except Exception as e:
+        logger.error(f"[EMAIL] Error enviando broadcast a {to}: {e}")
+        return False
+
+
+def send_weekly_attendance_report_email(
+    leader_email: str,
+    leader_name: str,
+    grupo: str,
+    period_start: str,
+    period_end: str,
+    stats: dict,
+    actividades: list,
+    inasistentes_top: list = None,
+    app_url: str = None,
+) -> bool:
+    """Envía el reporte ejecutivo semanal de asistencia al líder de un grupo."""
+    try:
+        subject = f"Reporte Semanal de Asistencia — {grupo} ({period_start} a {period_end})"
+        app_url = app_url or os.getenv('FRONTEND_URL', 'https://dagma-360-capture.vercel.app')
+        html = _render_template('weekly_attendance_leader.html', {
+            'subject': subject,
+            'header_color': '#2e7d32',
+            'header_title': 'DAGMA — Reporte Semanal de Asistencia',
+            'header_subtitle': grupo,
+            'leader_name': leader_name,
+            'grupo': grupo,
+            'period_start': period_start,
+            'period_end': period_end,
+            'stats': stats or {},
+            'actividades': actividades or [],
+            'inasistentes_top': inasistentes_top or [],
+            'app_url': app_url,
+        })
+        return _send_email(leader_email, subject, html, template='weekly_attendance')
+    except Exception as e:
+        logger.error(f"[EMAIL] Error enviando reporte semanal a {leader_email}: {e}")
+        return False
+
+
+def send_test_email(to: str) -> bool:
+    """Envío de prueba/smoke (utilizado por /admin/notifications/health)."""
+    try:
+        subject = '[DAGMA] Prueba de notificaciones'
+        html = _render_template('generic_announcement.html', {
+            'subject': subject,
+            'header_color': '#2e7d32',
+            'header_title': 'DAGMA — Test de notificaciones',
+            'header_subtitle': datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M UTC'),
+            'priority': 'info',
+            'message_html': (
+                '<p>Este es un correo de prueba enviado desde el servicio de notificaciones '
+                'de Artefacto 360 DAGMA. Si lo recibe, la configuración SMTP/Gmail está OK.</p>'
+            ),
+            'cta_url': '',
+            'cta_label': '',
+        })
+        return _send_raw_email(to, subject, html, template='test')
+    except Exception as e:
+        logger.error(f"[EMAIL] Error en send_test_email a {to}: {e}")
+        return False
+
+
+def get_notifications_health() -> dict:
+    """Reporte de estado para el endpoint admin/notifications/health."""
+    count = _count_sent_last_24h()
+    smtp_ok = bool(os.getenv('SMTP_HOST') and os.getenv('SMTP_USER') and os.getenv('SMTP_PASSWORD'))
+    gmail_ok = bool(
+        os.getenv('GMAIL_CLIENT_ID') and os.getenv('GMAIL_CLIENT_SECRET')
+        and os.getenv('GMAIL_REFRESH_TOKEN')
+    )
+    return {
+        'smtp_configured': smtp_ok,
+        'gmail_api_configured': gmail_ok,
+        'smtp_host': os.getenv('SMTP_HOST', ''),
+        'smtp_port': int(os.getenv('SMTP_PORT', '587') or 587),
+        'sender': os.getenv('GMAIL_SENDER') or os.getenv('SMTP_USER', ''),
+        'sender_name': os.getenv('SMTP_SENDER_NAME', ''),
+        'frontend_url': os.getenv('FRONTEND_URL', ''),
+        'daily_quota': DAILY_EMAIL_QUOTA,
+        'sent_last_24h': count,
+        'warn_threshold': int(DAILY_EMAIL_QUOTA * QUOTA_WARN_THRESHOLD),
+        'block_threshold': int(DAILY_EMAIL_QUOTA * QUOTA_BLOCK_THRESHOLD),
+        'quota_usage_pct': round((count / DAILY_EMAIL_QUOTA) * 100, 1) if DAILY_EMAIL_QUOTA else 0,
+    }

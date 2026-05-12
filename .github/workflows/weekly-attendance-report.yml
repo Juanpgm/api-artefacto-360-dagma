@@ -1,0 +1,48 @@
+name: Weekly Attendance Report
+
+on:
+  schedule:
+    # Lunes 12:00 UTC = 07:00 hora Colombia (UTC-5)
+    - cron: "0 12 * * 1"
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Ejecutar en modo dry-run (no envía correos)"
+        required: false
+        default: "false"
+
+jobs:
+  trigger:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Resolve dry_run flag
+        id: flag
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ] && [ "${{ github.event.inputs.dry_run }}" = "true" ]; then
+            echo "dry_run=true" >> $GITHUB_OUTPUT
+          else
+            echo "dry_run=false" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Call weekly-attendance endpoint
+        env:
+          BACKEND_URL: ${{ secrets.RAILWAY_BACKEND_URL }}
+          CRON_TOKEN: ${{ secrets.REPORTS_CRON_TOKEN }}
+          DRY_RUN: ${{ steps.flag.outputs.dry_run }}
+        run: |
+          if [ -z "$BACKEND_URL" ] || [ -z "$CRON_TOKEN" ]; then
+            echo "::error::Faltan secrets RAILWAY_BACKEND_URL o REPORTS_CRON_TOKEN."
+            exit 1
+          fi
+          URL="${BACKEND_URL%/}/admin/reports/weekly-attendance/run?dry_run=${DRY_RUN}"
+          echo "POST $URL"
+          HTTP_CODE=$(curl -sS -o response.json -w "%{http_code}" \
+            -X POST "$URL" \
+            -H "X-Cron-Token: $CRON_TOKEN" \
+            -H "Content-Type: application/json")
+          echo "HTTP $HTTP_CODE"
+          cat response.json
+          if [ "$HTTP_CODE" != "200" ] && [ "$HTTP_CODE" != "202" ]; then
+            echo "::error::Llamada al backend falló con código $HTTP_CODE"
+            exit 1
+          fi

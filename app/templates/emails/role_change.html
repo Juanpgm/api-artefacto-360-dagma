@@ -1,0 +1,21 @@
+{% extends "_base.html" %}
+{% import "_macros.html" as m %}
+
+{% block content %}
+<p>Estimado/a <strong>{{ nombre | default('Usuario') }}</strong>,</p>
+<p>Le informamos que su <strong>rol</strong> en el sistema <strong>Artefacto 360 DAGMA</strong>
+   ha sido modificado.</p>
+{{ m.kv_table([
+  ('Rol anterior', old_role | default('—')),
+  ('Rol nuevo', '<strong>' ~ (new_role | default('—')) ~ '</strong>'),
+  ('Actualizado por', actor_name | default('Administrador')),
+  ('Fecha del cambio', timestamp | default('')),
+]) }}
+<p style="background:#fff3cd;border-left:4px solid #ffa000;padding:12px 16px;margin:16px 0;border-radius:4px;">
+  <strong>Acción requerida:</strong> debe <strong>cerrar sesión y volver a iniciar sesión</strong>
+  para que el nuevo rol tome efecto en la aplicación.
+</p>
+<p style="font-size:13px;color:#666;">
+  Si no estaba al tanto de este cambio o cree que es un error, contacte a la Central Operativa de DAGMA.
+</p>
+{% endblock %}
