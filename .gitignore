@@ -37,6 +37,13 @@ ENV/
 env.bak/
 venv.bak/
 
+# OAuth / Secrets (NEVER COMMIT)
+oauth_client.json
+client_secret*.json
+clien_OAuth_secret.json
+*_credentials.json
+gmail_token.json
+
 
 basemaps/plan_distrito_verde.xlsx
 cargar-actividades.ipynb
