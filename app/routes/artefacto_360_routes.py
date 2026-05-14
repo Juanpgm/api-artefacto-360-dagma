@@ -663,8 +663,11 @@ async def _post_reporte_intervencion(
             try:
                 s3_client = get_s3_client()
             except ValueError as e:
-                print(f"⚠️ ADVERTENCIA: {str(e)}. Las fotos NO se subirán a S3.")
-
+                logger.error(f"[S3-FAIL] Credenciales S3 no configuradas: {e}")
+                raise HTTPException(
+                    status_code=500,
+                    detail="Configuración S3 incompleta. Las fotos no pueden guardarse en este momento."
+                )
             documentos = await upload_photos_to_s3(photos, s3_prefix, reporte_id, s3_client, bucket_name)
 
         # Preparar datos comunes para guardar en Firebase

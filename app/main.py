@@ -97,6 +97,7 @@ app.add_middleware(
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
+    expose_headers=["X-Process-Time", "X-Request-Id"],
 )
 
 # Registrar routers
@@ -120,6 +121,13 @@ async def global_exception_handler(request, exc):
             "type": type(exc).__name__
         }
     )
+
+# ── Health check (sin auth, para ping de conectividad desde la PWA) ──────────
+@app.get("/health", include_in_schema=False)
+async def health_check():
+    """Lightweight health check — no auth required. Used by PWA connectivity detection."""
+    return {"status": "ok", "version": app.version}
+
 
 if __name__ == "__main__":
     import uvicorn
