@@ -386,12 +386,26 @@ def send_assignment_notification_email(
     person_email: str,
     nombre: str,
     grupo: str,
-    actividad_data: dict
+    actividad_data: dict,
+    lider_nombre: str = None,
+    lider_telefono: str = None,
 ) -> bool:
-    """Notificación de asignación al personal (con .ics adjunto)."""
+    """Notificación de asignación al personal (con .ics adjunto).
+
+    `lider_nombre` y `lider_telefono` corresponden al LÍDER de la actividad
+    (no al coordinador que la programó). Si no se pasan, la plantilla cae a
+    los valores de `actividad_data`.
+    """
     try:
         fecha = actividad_data.get('fecha_actividad', '')
         subject = f"Asignación Actividad Ambiental DAGMA — {fecha}"
+        # Vista de la actividad con los datos del LÍDER (no del coordinador) para
+        # los campos `lider_actividad` y `telefono` que rinde la tabla de detalles.
+        actividad_view = dict(actividad_data)
+        if lider_nombre:
+            actividad_view['lider_actividad'] = lider_nombre
+        if lider_telefono:
+            actividad_view['telefono'] = lider_telefono
         html = _render_template('assignment_notification.html', {
             'subject': subject,
             'header_color': '#1565c0',
@@ -399,7 +413,9 @@ def send_assignment_notification_email(
             'header_subtitle': '',
             'nombre': nombre,
             'grupo': grupo,
-            'actividad': actividad_data,
+            'actividad': actividad_view,
+            'lider_nombre': lider_nombre,
+            'lider_telefono': lider_telefono,
         })
         ics = generate_ics(actividad_data)
         return _send_email(person_email, subject, html,
@@ -440,19 +456,31 @@ def send_leaders_notification_email(
 def send_removal_notification_email(
     person_email: str,
     nombre: str,
-    actividad_data: dict
+    actividad_data: dict,
+    lider_nombre: str = None,
+    lider_telefono: str = None,
 ) -> bool:
-    """Notificación de desasignación al personal removido."""
+    """Notificación de desasignación al personal removido.
+
+    `lider_nombre` y `lider_telefono` corresponden al LÍDER de la actividad.
+    """
     try:
         fecha = actividad_data.get('fecha_actividad', '')
         subject = f"Desasignación de Actividad Ambiental DAGMA — {fecha}"
+        actividad_view = dict(actividad_data)
+        if lider_nombre:
+            actividad_view['lider_actividad'] = lider_nombre
+        if lider_telefono:
+            actividad_view['telefono'] = lider_telefono
         html = _render_template('removal_notification.html', {
             'subject': subject,
             'header_color': '#c62828',
             'header_title': 'DAGMA — Desasignación de Actividad Ambiental',
             'header_subtitle': '',
             'nombre': nombre,
-            'actividad': actividad_data,
+            'actividad': actividad_view,
+            'lider_nombre': lider_nombre,
+            'lider_telefono': lider_telefono,
         })
         return _send_email(person_email, subject, html, template='removal_notification')
     except Exception as e:

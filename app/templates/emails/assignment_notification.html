@@ -15,8 +15,8 @@
 </p>
 <p>
   Por favor, confírmele su asistencia al líder:<br>
-  <strong>{{ actividad.get('lider_actividad', 'N/A') }}</strong> &mdash;
-  Tel: <strong>{{ actividad.get('telefono', 'N/A') }}</strong>
+  <strong>{{ lider_nombre or actividad.get('lider_actividad', 'N/A') }}</strong> &mdash;
+  Tel: <strong>{{ lider_telefono or actividad.get('telefono', 'N/A') }}</strong>
 </p>
 <p>Preséntese puntualmente en el punto de encuentro indicado.</p>
 {% endblock %}

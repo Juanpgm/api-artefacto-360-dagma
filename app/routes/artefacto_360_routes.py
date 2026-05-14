@@ -22,6 +22,7 @@ import logging
 from pydantic import BaseModel, Field
 from app.models.validation import CoordinatesModel, ArbolesDataModel
 from app.utils.firestore_async import run_blocking, stream_to_list
+from app.utils.text_utils import normalize_grupo, grupos_match
 
 # Importar configuración de Firebase y S3/Storage
 from app.firebase_config import db
@@ -749,7 +750,7 @@ async def _get_reportes_intervenciones(
 
     # Operador y lider solo pueden ver su propio grupo
     if current_user is not None and not current_user.at_least(Role.ADMINISTRADOR):
-        if current_user.grupo and current_user.grupo.lower() != grupo_key.lower():
+        if current_user.grupo and not grupos_match(current_user.grupo, grupo_key):
             raise HTTPException(
                 status_code=403,
                 detail=f"No tienes acceso al grupo '{grupo_key}'. Solo puedes consultar '{current_user.grupo}'.",
@@ -1528,8 +1529,26 @@ async def get_actividades(
         query = plan_ref
 
         if grupo:
-            # Filter by grupos_requeridos array (stores display names like "Cuadrilla", "Vivero", etc.)
-            query = query.where("grupos_requeridos", "array_contains", grupo.strip())
+            # Filter by grupos_requeridos array.
+            # `grupos_requeridos` guarda nombres canónicos como en la colección `grupos`
+            # (p.ej. "Acústica", "Cuadrilla"). El cliente puede enviarlo con tildes
+            # diferentes o en minúscula; resolvemos el nombre canónico contra `grupos`
+            # antes de filtrar (Firestore no soporta comparaciones case/accent insensitive).
+            grupo_input = grupo.strip()
+            canonical_grupo = grupo_input
+            try:
+                grupos_docs = await asyncio.to_thread(lambda: list(db.collection("grupos").stream()))
+                target_norm = normalize_grupo(grupo_input)
+                for gdoc in grupos_docs:
+                    gdata = gdoc.to_dict() or {}
+                    nombre = (gdata.get("nombre") or "").strip()
+                    if nombre and normalize_grupo(nombre) == target_norm:
+                        canonical_grupo = nombre
+                        break
+            except Exception as e:
+                logger.warning(f"[ACTIVIDADES] No se pudo resolver nombre canónico de grupo '{grupo_input}': {e}")
+
+            query = query.where("grupos_requeridos", "array_contains", canonical_grupo)
 
         # Paginación cursor-based (Firestore no soporta OFFSET)
         if start_after:
@@ -1772,33 +1791,97 @@ async def convocar_actividad(
                 logger.warning(f"[GMAIL] Error en flujo líder-de-actividad: {e}")
             try:
                 app_url = os.getenv('FRONTEND_URL', 'https://dagma-360-capture.vercel.app')
-                grupos_docs = list(db.collection("grupos").stream())
-                for gdoc in grupos_docs:
-                    gdata = gdoc.to_dict() or {}
-                    lider_raw = gdata.get("lider")
-                    # `lider` puede venir como dict {email,nombre} o como string (email o nombre).
-                    if isinstance(lider_raw, dict):
-                        lider_email = (lider_raw.get("email") or "").strip()
-                        lider_nombre = (lider_raw.get("nombre") or "").strip()
-                    elif isinstance(lider_raw, str):
-                        lider_str = lider_raw.strip()
-                        if "@" in lider_str:
-                            lider_email, lider_nombre = lider_str, ""
+                # FIX (BUG #5): solo notificar a los líderes de los grupos en
+                # `grupos_requeridos`, no a TODOS los grupos del sistema.
+                grupos_requeridos_norm = {
+                    normalize_grupo(g) for g in (body.grupos_requeridos or []) if g
+                }
+                if not grupos_requeridos_norm:
+                    logger.info("[GMAIL] No hay grupos_requeridos; no se notifica a líderes de grupo")
+                    return
+
+                # Indexar líderes por grupo normalizado, usando primero la colección
+                # `grupos` y, si falta info, completando con `users` (rol lider).
+                lideres_por_grupo: dict[str, list[dict]] = {}
+
+                try:
+                    for gdoc in db.collection("grupos").stream():
+                        gdata = gdoc.to_dict() or {}
+                        nombre_grupo = (gdata.get("nombre") or gdoc.id or "").strip()
+                        clave = normalize_grupo(nombre_grupo)
+                        if clave not in grupos_requeridos_norm:
+                            continue
+                        lider_raw = gdata.get("lider")
+                        if isinstance(lider_raw, dict):
+                            l_email = (lider_raw.get("email") or "").strip()
+                            l_nombre = (lider_raw.get("nombre") or "").strip()
+                        elif isinstance(lider_raw, str):
+                            s = lider_raw.strip()
+                            if "@" in s:
+                                l_email, l_nombre = s, ""
+                            else:
+                                l_email, l_nombre = "", s
                         else:
-                            lider_email, lider_nombre = "", lider_str
-                    else:
-                        lider_email, lider_nombre = "", ""
-                    if not lider_email:
-                        lider_email = (gdata.get("email") or "").strip()
-                    if not lider_nombre:
-                        lider_nombre = (gdata.get("nombre") or "").strip()
-                    if lider_email and "@" in lider_email:
+                            l_email, l_nombre = "", ""
+                        if not l_email:
+                            l_email = (gdata.get("email") or "").strip()
+                        if not l_nombre:
+                            l_nombre = (gdata.get("nombre") or "").strip()
+                        if l_email and "@" in l_email:
+                            lideres_por_grupo.setdefault(clave, []).append(
+                                {"email": l_email, "nombre": l_nombre}
+                            )
+                except Exception as e:
+                    logger.debug(f"[GMAIL] Error indexando colección grupos: {e}")
+
+                # Fallback: completar con users donde role/rol == lider y grupo coincide.
+                grupos_sin_lider = grupos_requeridos_norm - set(lideres_por_grupo.keys())
+                if grupos_sin_lider:
+                    try:
+                        for rol_field in ("role", "rol"):
+                            try:
+                                qs = db.collection("users").where(
+                                    rol_field, "in", ["lider", "líder", "LIDER", "LÍDER"]
+                                ).limit(500).stream()
+                            except Exception:
+                                qs = []
+                            for udoc in qs:
+                                ud = udoc.to_dict() or {}
+                                clave = normalize_grupo(ud.get("grupo"))
+                                if clave not in grupos_sin_lider:
+                                    continue
+                                u_email = (ud.get("email") or "").strip()
+                                u_nombre = (
+                                    ud.get("full_name")
+                                    or ud.get("nombre_completo")
+                                    or ud.get("displayName")
+                                    or u_email
+                                )
+                                if u_email and "@" in u_email:
+                                    lideres_por_grupo.setdefault(clave, []).append(
+                                        {"email": u_email, "nombre": u_nombre}
+                                    )
+                    except Exception as e:
+                        logger.debug(f"[GMAIL] Fallback users-by-grupo falló: {e}")
+
+                # Despachar correos sin duplicar destinatarios.
+                ya_enviados: set[str] = set()
+                for clave, lideres in lideres_por_grupo.items():
+                    for lider in lideres:
+                        email_to = lider["email"].lower()
+                        if email_to in ya_enviados:
+                            continue
+                        ya_enviados.add(email_to)
                         try:
-                            send_leaders_notification_email(lider_email, lider_nombre, actividad_data, app_url)
+                            send_leaders_notification_email(
+                                lider["email"], lider["nombre"], actividad_data, app_url
+                            )
                         except Exception as e:
-                            logger.warning(f"[GMAIL] Error notificando lider {lider_email}: {e}")
+                            logger.warning(
+                                f"[GMAIL] Error notificando lider {lider['email']}: {e}"
+                            )
             except Exception as e:
-                logger.warning(f"[GMAIL] Error listando grupos para notificar: {e}")
+                logger.warning(f"[GMAIL] Error notificando líderes de grupos requeridos: {e}")
 
         if background_tasks is not None:
             background_tasks.add_task(_enviar_notificaciones_actividad)
@@ -2014,6 +2097,36 @@ async def update_actividad(
             mapa_anteriores = {(p.get("email") or "").strip().lower(): p for p in personal_anterior if p.get("email")}
 
             async def _enviar_emails():
+                # Resolver datos del LÍDER de la actividad (nombre + teléfono)
+                # para inyectarlos en las plantillas. El campo `telefono` en
+                # `actividad_data` corresponde al COORDINADOR que programó la
+                # actividad, no al líder; usar ese teléfono confunde al personal.
+                lider_email_act = (actividad_data.get("lider_actividad_email") or "").strip()
+                lider_nombre_act = (actividad_data.get("lider_actividad") or "").strip()
+                lider_telefono_act = None
+                if lider_email_act and "@" in lider_email_act:
+                    try:
+                        users_q = db.collection("users").where(
+                            "email", "==", lider_email_act
+                        ).limit(1)
+                        for udoc in await asyncio.to_thread(lambda: list(users_q.stream())):
+                            ud = udoc.to_dict() or {}
+                            tel_raw = ud.get("cellphone") or ud.get("telefono")
+                            if tel_raw not in (None, ""):
+                                lider_telefono_act = str(tel_raw).strip()
+                            if not lider_nombre_act:
+                                lider_nombre_act = (
+                                    ud.get("full_name")
+                                    or ud.get("nombre_completo")
+                                    or ud.get("displayName")
+                                    or ""
+                                )
+                            break
+                    except Exception as e:
+                        logger.debug(
+                            f"[EMAIL] No se pudo resolver teléfono del líder {lider_email_act}: {e}"
+                        )
+
                 for email_addr in emails_agregados:
                     persona = mapa_nuevos.get(email_addr, {})
                     logger.info(f"[EMAIL] Enviando email de ASIGNACION a: {email_addr}")
@@ -2024,6 +2137,8 @@ async def update_actividad(
                             nombre=persona.get("nombre_completo", ""),
                             grupo=persona.get("grupo", ""),
                             actividad_data=actividad_data,
+                            lider_nombre=lider_nombre_act or None,
+                            lider_telefono=lider_telefono_act,
                         )
                         logger.info(f"[EMAIL] Resultado asignacion {email_addr}: {result}")
                     except Exception as e:
@@ -2038,13 +2153,14 @@ async def update_actividad(
                             person_email=email_addr,
                             nombre=persona.get("nombre_completo", ""),
                             actividad_data=actividad_data,
+                            lider_nombre=lider_nombre_act or None,
+                            lider_telefono=lider_telefono_act,
                         )
                         logger.info(f"[EMAIL] Resultado desasignacion {email_addr}: {result}")
                     except Exception as e:
                         logger.error(f"[EMAIL] Error enviando desasignacion a {email_addr}: {e}", exc_info=True)
 
                 # CC al líder de la actividad con el resumen del delta (agregados/removidos).
-                lider_email_act = (actividad_data.get("lider_actividad_email") or "").strip()
                 if lider_email_act and "@" in lider_email_act and (emails_agregados or emails_eliminados):
                     try:
                         agregados_list = [mapa_nuevos.get(e, {}) for e in emails_agregados]
@@ -2052,7 +2168,7 @@ async def update_actividad(
                         await asyncio.to_thread(
                             send_assignment_summary_leader_email,
                             leader_email=lider_email_act,
-                            leader_name=actividad_data.get("lider_actividad", ""),
+                            leader_name=lider_nombre_act,
                             actividad_data=actividad_data,
                             agregados=agregados_list,
                             removidos=removidos_list,
@@ -2129,7 +2245,7 @@ async def crear_personal_operativo(
     try:
         # Lider solo puede crear personal de su propio grupo
         if not current_user.at_least(Role.ADMINISTRADOR):
-            if current_user.grupo and body.grupo.strip().lower() != current_user.grupo.lower():
+            if current_user.grupo and not grupos_match(body.grupo, current_user.grupo):
                 raise HTTPException(
                     status_code=403,
                     detail=f"Solo puedes crear personal del grupo '{current_user.grupo}'.",

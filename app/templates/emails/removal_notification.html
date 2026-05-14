@@ -9,7 +9,7 @@
 {{ m.activity_details_table(actividad) }}
 <p style="margin-top:16px;">
   Si tiene alguna duda, comuníquese con el líder:<br>
-  <strong>{{ actividad.get('lider_actividad', 'N/A') }}</strong> &mdash;
-  Tel: <strong>{{ actividad.get('telefono', 'N/A') }}</strong>
+  <strong>{{ lider_nombre or actividad.get('lider_actividad', 'N/A') }}</strong> &mdash;
+  Tel: <strong>{{ lider_telefono or actividad.get('telefono', 'N/A') }}</strong>
 </p>
 {% endblock %}
