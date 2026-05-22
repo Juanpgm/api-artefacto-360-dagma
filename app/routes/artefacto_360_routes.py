@@ -2370,6 +2370,12 @@ async def update_actividad(
                 lider_email_act = (actividad_data.get("lider_actividad_email") or "").strip()
                 lider_nombre_act = (actividad_data.get("lider_actividad") or "").strip()
                 lider_telefono_act = None
+
+                # Si no hay email directo (el frontend no lo envía), resolver por nombre
+                if not lider_email_act and lider_nombre_act:
+                    lider_email_act, lider_nombre_act = await _resolver_lider_actividad_async(actividad_data)
+
+                # Con el email ya resuelto, buscar el teléfono en la colección users
                 if lider_email_act and "@" in lider_email_act:
                     try:
                         users_q = db.collection("users").where(
