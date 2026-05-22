@@ -573,18 +573,26 @@ def send_activity_cancellation_email(
     to_email: str,
     nombre: str,
     actividad_data: dict,
+    lider_telefono: str = None,
 ) -> bool:
-    """Notifica la cancelación de una actividad a un destinatario."""
+    """Notifica la cancelación de una actividad a un destinatario.
+
+    `lider_telefono` corresponde al LÍDER de la actividad (no al coordinador).
+    Si se provee, sobreescribe el campo `telefono` en la vista de detalles.
+    """
     try:
         fecha = actividad_data.get('fecha_actividad', '')
         subject = f"CANCELACIÓN — Actividad Ambiental DAGMA — {fecha}"
+        actividad_view = dict(actividad_data)
+        if lider_telefono:
+            actividad_view['telefono'] = lider_telefono
         html = _render_template('activity_cancellation.html', {
             'subject': subject,
             'header_color': '#b71c1c',
             'header_title': 'DAGMA — Actividad Cancelada',
             'header_subtitle': 'Esta actividad ha sido cancelada',
             'nombre': nombre,
-            'actividad': actividad_data,
+            'actividad': actividad_view,
         })
         return _send_email(to_email, subject, html, template='activity_cancellation')
     except Exception as e:
@@ -598,22 +606,28 @@ def send_activity_modification_email(
     actividad_data: dict,
     cambios: list,
     app_url: str = None,
+    lider_telefono: str = None,
 ) -> bool:
     """Notifica modificaciones en una actividad indicando qué campos cambiaron.
 
     `cambios` es una lista de dicts: [{"campo": str, "antes": str, "despues": str}].
+    `lider_telefono` corresponde al LÍDER de la actividad (no al coordinador).
+    Si se provee, sobreescribe el campo `telefono` en la vista de detalles.
     """
     try:
         fecha = actividad_data.get('fecha_actividad', '')
         subject = f"MODIFICACIÓN — Actividad Ambiental DAGMA — {fecha}"
         app_url = app_url or os.getenv('FRONTEND_URL', 'https://dagma-360-capture-frontend.vercel.app')
+        actividad_view = dict(actividad_data)
+        if lider_telefono:
+            actividad_view['telefono'] = lider_telefono
         html = _render_template('activity_modification.html', {
             'subject': subject,
             'header_color': '#f57f17',
             'header_title': 'DAGMA — Modificación de Actividad',
             'header_subtitle': 'Se han realizado cambios en la actividad',
             'nombre': nombre,
-            'actividad': actividad_data,
+            'actividad': actividad_view,
             'cambios': cambios or [],
             'app_url': app_url,
         })

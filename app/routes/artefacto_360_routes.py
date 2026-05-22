@@ -2176,6 +2176,19 @@ async def delete_actividad(actividad_id: str, background_tasks: BackgroundTasks 
             lider_email_canc, lider_nombre_canc = await _resolver_lider_actividad_async(actividad_data_cancel)
             if lider_email_canc:
                 destinatarios.setdefault(lider_email_canc, lider_nombre_canc or lider_email_canc)
+            # Resolver teléfono del líder para no mostrar el del coordinador en el correo
+            lider_telefono_canc = None
+            if lider_email_canc and "@" in lider_email_canc:
+                try:
+                    users_q = db.collection("users").where("email", "==", lider_email_canc).limit(1)
+                    for udoc in await asyncio.to_thread(lambda: list(users_q.stream())):
+                        ud = udoc.to_dict() or {}
+                        tel_raw = ud.get("cellphone") or ud.get("telefono")
+                        if tel_raw not in (None, ""):
+                            lider_telefono_canc = str(tel_raw).strip()
+                        break
+                except Exception as e:
+                    logger.debug(f"[CANCEL] No se pudo resolver teléfono del líder {lider_email_canc}: {e}")
             # Incluir también líderes de los grupos requeridos
             grupos_req = actividad_data_cancel.get("grupos_requeridos") or []
             if grupos_req:
@@ -2216,6 +2229,7 @@ async def delete_actividad(actividad_id: str, background_tasks: BackgroundTasks 
                         to_email=email_addr,
                         nombre=nombre_addr,
                         actividad_data=actividad_data_cancel,
+                        lider_telefono=lider_telefono_canc,
                     )
                     logger.info(f"[CANCEL] Correo enviado a {email_addr}")
                 except Exception as e:
@@ -2509,6 +2523,19 @@ async def update_actividad(
                 lider_email_mod, lider_nombre_mod = await _resolver_lider_actividad_async(_updated_snapshot)
                 if lider_email_mod:
                     destinatarios.setdefault(lider_email_mod, lider_nombre_mod or lider_email_mod)
+                # Resolver teléfono del líder para no mostrar el del coordinador en el correo
+                lider_telefono_mod = None
+                if lider_email_mod and "@" in lider_email_mod:
+                    try:
+                        users_q = db.collection("users").where("email", "==", lider_email_mod).limit(1)
+                        for udoc in await asyncio.to_thread(lambda: list(users_q.stream())):
+                            ud = udoc.to_dict() or {}
+                            tel_raw = ud.get("cellphone") or ud.get("telefono")
+                            if tel_raw not in (None, ""):
+                                lider_telefono_mod = str(tel_raw).strip()
+                            break
+                    except Exception as e:
+                        logger.debug(f"[MODIF] No se pudo resolver teléfono del líder {lider_email_mod}: {e}")
                 logger.info(
                     f"[MODIF] Cambios detectados: {[c['campo'] for c in _cambios_snapshot]}. "
                     f"Enviando a {len(destinatarios)} destinatario(s): {list(destinatarios.keys())}"
@@ -2522,6 +2549,7 @@ async def update_actividad(
                             actividad_data=_updated_snapshot,
                             cambios=_cambios_snapshot,
                             app_url=app_url_mod,
+                            lider_telefono=lider_telefono_mod,
                         )
                         logger.info(f"[MODIF] Correo enviado a {email_addr}")
                     except Exception as e:
