@@ -16,6 +16,7 @@ from app.firebase_config import auth_client, db
 from app.models.roles import Role, can_assign_role, normalize_role
 from app.deps.authz import get_current_user, require_min_role, CurrentUser
 from app.utils.firestore_async import run_blocking, stream_to_list
+from app.utils.text_utils import normalize_grupo
 from app.services.gmail_service import (
     send_role_change_email,
     send_grupo_change_email,
@@ -329,16 +330,17 @@ async def register_user(user_data: UserRegistrationRequest, request: Request):
             password=user_data.password,
             display_name=user_data.full_name,
         )
+        grupo_canonico = normalize_grupo(user_data.grupo) or None
         db.collection("users").document(user.uid).set({
             "email": user_data.email,
             "full_name": user_data.full_name,
             "cellphone": user_data.cellphone,
-            "grupo": user_data.grupo.strip().lower() if user_data.grupo else None,
+            "grupo": grupo_canonico,
             "role": Role.OPERADOR,
             "created_at": datetime.now(timezone.utc),
             "uid": user.uid,
         })
-        auth_client.set_custom_user_claims(user.uid, {"role": Role.OPERADOR, "grupo": user_data.grupo.strip().lower() if user_data.grupo else None})
+        auth_client.set_custom_user_claims(user.uid, {"role": Role.OPERADOR, "grupo": grupo_canonico})
         logging.info(f"Usuario registrado: {user.email} (UID: {user.uid})")
         return {
             "success": True,
@@ -399,7 +401,9 @@ async def complete_google_profile(
         )
     if not body.grupo or not body.grupo.strip():
         raise HTTPException(status_code=400, detail="El campo 'grupo' es obligatorio.")
-    grupo_normalizado = body.grupo.strip().lower()
+    grupo_normalizado = normalize_grupo(body.grupo)
+    if not grupo_normalizado:
+        raise HTTPException(status_code=400, detail="El campo 'grupo' es obligatorio.")
     update_data: dict = {
         "grupo": grupo_normalizado,
         "needs_review": False,
@@ -679,7 +683,7 @@ async def change_user_grupo(
     target_data = target_doc.to_dict() or {}
     old_grupo = target_data.get("grupo")
     role = target_data.get("role") or normalize_role(target_data.get("rol", "")) or Role.OPERADOR
-    grupo_normalizado = body.grupo.strip().lower() if body.grupo else None
+    grupo_normalizado = normalize_grupo(body.grupo) or None if body.grupo else None
     db.collection("users").document(uid).update({"grupo": grupo_normalizado, "needs_review": False})
     auth_client.set_custom_user_claims(uid, {"role": role, "grupo": grupo_normalizado})
     auth_client.revoke_refresh_tokens(uid)
@@ -779,12 +783,17 @@ async def list_system_users(
         filters.update(extra_filters)
 
         # Empuja filtros selectivos a Firestore para evitar cargar toda la coleccion.
-        # Orden de preferencia: uid (1 doc), email (~1 doc), role, grupo.
+        # Orden de preferencia: uid (1 doc), email (~1 doc), grupo (~decenas), role.
+        # Para `grupo` se empuja la forma canonica (normalize_grupo) porque la
+        # coleccion ya esta canonicalizada (ver scripts/normalize_grupos.py).
+        # Si quedan docs legacy no canonicos, el filtro en memoria los rescata.
         query = db.collection("users")
         pushed_field = None
-        for candidate in ("uid", "email", "role", "grupo"):
+        for candidate in ("uid", "email", "grupo", "role"):
             if candidate in filters:
-                query = query.where(candidate, "==", filters[candidate])
+                value = filters[candidate]
+                pushed_value = normalize_grupo(value) if candidate == "grupo" else value
+                query = query.where(candidate, "==", pushed_value)
                 pushed_field = candidate
                 break
         # Cap defensivo: nunca traer mas de 1000 docs aunque no haya limit.
@@ -807,7 +816,13 @@ async def list_system_users(
                 if current_value is None:
                     matches = False
                     break
-                if str(current_value).strip().lower() != expected_value.lower():
+                if field_name == "grupo":
+                    # Comparacion tolerante: insensible a mayusculas/tildes y
+                    # equivalencia entre "_" y espacio ("Central_Social" == "Central Social").
+                    if normalize_grupo(current_value) != normalize_grupo(expected_value):
+                        matches = False
+                        break
+                elif str(current_value).strip().lower() != expected_value.lower():
                     matches = False
                     break
             if matches:
@@ -837,24 +852,35 @@ async def list_leader_users(
     current_user: CurrentUser = Depends(require_min_role(Role.LIDER)),
 ):
     """
-    Lista todos los usuarios con rol líder sin aplicar filtro por grupo.
+    Lista todos los usuarios elegibles como lider_actividad.
+
+    - Lider: solo ve usuarios con rol 'lider'.
+    - Administrador/Director/Desarrollador: ve también usuarios con rol 'administrador'.
 
     Este endpoint alimenta los selectores de programación, que necesitan
     ver el catálogo completo de líderes elegibles para los grupos requeridos.
     """
     try:
+        # Roles elegibles según el nivel del usuario que consulta.
+        caller_can_see_admins = current_user.at_least(Role.ADMINISTRADOR)
+
         # Filtro a nivel Firestore para no escanear toda la coleccion.
         # Algunos docs antiguos pueden tener el rol guardado en "rol" en lugar de "role";
         # se traen ambos y se deduplican por uid.
-        primary_q = db.collection("users").where("role", "==", Role.LIDER).limit(500)
-        legacy_q = db.collection("users").where("rol", "==", Role.LIDER).limit(500)
-        primary_docs, legacy_docs = await asyncio.gather(
-            stream_to_list(primary_q),
-            stream_to_list(legacy_q),
-        )
+        queries = [
+            db.collection("users").where("role", "==", Role.LIDER).limit(500),
+            db.collection("users").where("rol", "==", Role.LIDER).limit(500),
+        ]
+        if caller_can_see_admins:
+            queries += [
+                db.collection("users").where("role", "==", Role.ADMINISTRADOR).limit(500),
+                db.collection("users").where("rol", "==", Role.ADMINISTRADOR).limit(500),
+            ]
+
+        all_results = await asyncio.gather(*[stream_to_list(q) for q in queries])
         seen: set = set()
         lideres = []
-        for doc in list(primary_docs) + list(legacy_docs):
+        for doc in [d for batch in all_results for d in batch]:
             if doc.id in seen:
                 continue
             seen.add(doc.id)
@@ -863,7 +889,12 @@ async def list_leader_users(
                 data["uid"] = doc.id
 
             role = normalize_role(data.get("role") or data.get("rol"))
-            if role != Role.LIDER:
+            # Solo incluir lider (para todos) y administrador (solo para admin+).
+            if role == Role.LIDER:
+                pass  # siempre elegible
+            elif role == Role.ADMINISTRADOR and caller_can_see_admins:
+                pass  # elegible solo para admin+
+            else:
                 continue
 
             lideres.append(

@@ -14,6 +14,7 @@ class Role(str, Enum):
     OPERADOR = "operador"
     LIDER = "lider"
     ADMINISTRADOR = "administrador"
+    DIRECTOR = "director"
     DESARROLLADOR = "desarrollador"
 
 
@@ -22,6 +23,7 @@ ROLE_HIERARCHY: dict[str, int] = {
     Role.OPERADOR: 1,
     Role.LIDER: 2,
     Role.ADMINISTRADOR: 3,
+    Role.DIRECTOR: 3,
     Role.DESARROLLADOR: 4,
 }
 
@@ -30,6 +32,8 @@ LEGACY_ROLE_MAP: dict[str, str] = {
     "admin": Role.ADMINISTRADOR,
     "administrator": Role.ADMINISTRADOR,
     "administrador": Role.ADMINISTRADOR,
+    "director": Role.DIRECTOR,
+    "directora": Role.DIRECTOR,
     "super_admin": Role.DESARROLLADOR,
     "superadmin": Role.DESARROLLADOR,
     "desarrollador": Role.DESARROLLADOR,
@@ -79,8 +83,8 @@ def can_assign_role(actor_role: str, target_role: str) -> bool:
 
     if actor_role == Role.DESARROLLADOR:
         return True
-    if actor_role == Role.ADMINISTRADOR:
-        # administrador no puede crear/asignar desarrollador
+    if actor_role in (Role.ADMINISTRADOR, Role.DIRECTOR):
+        # administrador/director no puede crear/asignar desarrollador
         return target_level <= ROLE_HIERARCHY[Role.ADMINISTRADOR]
     # lider y operador no pueden asignar roles
     return False

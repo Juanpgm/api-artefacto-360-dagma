@@ -4,7 +4,7 @@ Rutas para gestión de Artefacto de Captura DAGMA
 from fastapi import APIRouter, HTTPException, Form, UploadFile, File, Query, Response, Depends, Body, BackgroundTasks
 from typing import List, Optional
 from enum import Enum
-from app.models.roles import Role, CurrentUser
+from app.models.roles import Role, CurrentUser, normalize_role
 from app.deps.authz import get_current_user, require_min_role
 import asyncio
 from datetime import datetime, timedelta, timezone
@@ -1763,10 +1763,30 @@ Registra una convocatoria de actividad con georreferenciación automática del p
 async def convocar_actividad(
     body: ConvocarActividadRequest = Body(...),
     background_tasks: BackgroundTasks = None,
+    current_user: CurrentUser = Depends(require_min_role(Role.LIDER)),
 ):
     """
     Convoca una actividad y la registra en la base de datos, calculando comuna/corregimiento y barrio/vereda.
+
+    Requiere autenticación con nivel mínimo 'lider'.
+    Para asignar un usuario con rol 'Administrador' como lider_actividad, el solicitante
+    debe tener rol 'Administrador', 'Director' o 'Desarrollador'.
     """
+    # Validar que si el lider_actividad_email corresponde a un Administrador,
+    # solo Administrador/Director/Desarrollador puede hacer esa asignación.
+    if body.lider_actividad_email:
+        target_email = body.lider_actividad_email.strip().lower()
+        target_docs = await stream_to_list(
+            db.collection("users").where("email", "==", target_email).limit(1)
+        )
+        if target_docs:
+            target_data = target_docs[0].to_dict() or {}
+            target_role = normalize_role(target_data.get("role") or target_data.get("rol"))
+            if target_role == Role.ADMINISTRADOR and not current_user.at_least(Role.ADMINISTRADOR):
+                raise HTTPException(
+                    status_code=403,
+                    detail="Solo Administrador, Director o Desarrollador pueden asignar un Administrador como líder de actividad.",
+                )
     try:
         # Validar y extraer geometry
         punto = body.punto_encuentro
@@ -2303,10 +2323,9 @@ async def update_actividad(
     Actualizar una actividad. Requiere nivel lider o superior.
     Si body incluye personal_asignado, dispara notificaciones (email + Calendar).
     """
-    # Solo lider de un grupo específico puede asignar personal en actividades que requieran su grupo
-    # Administrador+ puede modificar cualquier campo de cualquier actividad
-    if not current_user.at_least(Role.ADMINISTRADOR) and "estado_actividad" in body:
-        # Solo administrador puede cambiar estado de actividad (no solo personal_asignado)
+    # Lider solo puede modificar personal_asignado; cualquier otro campo requiere administrador+.
+    # Administrador+ puede modificar cualquier campo de cualquier actividad.
+    if not current_user.at_least(Role.ADMINISTRADOR):
         allowed_fields = {"personal_asignado"}
         disallowed = set(body.keys()) - allowed_fields
         if disallowed:
