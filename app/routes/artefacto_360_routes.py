@@ -17,10 +17,11 @@ _background_tasks = set()
 
 
 def _resolver_destinatarios_actividad(actividad_data: dict) -> dict:
-    """Retorna {email_lower: nombre} para coordinador, líder y personal asignado de una actividad.
+    """Retorna {email_lower: nombre} para el líder (si tiene email guardado) y el personal
+    asignado operativo de una actividad.
 
-    No incluye líderes de grupos (requieren consulta a Firestore; se resuelven por separado
-    en los flujos asíncronos de cancelación/modificación).
+    NO incluye al coordinador que programó la actividad ni a líderes de grupos
+    (estos últimos requieren consulta a Firestore; se resuelven por separado).
     """
     result: dict[str, str] = {}
 
@@ -29,11 +30,56 @@ def _resolver_destinatarios_actividad(actividad_data: dict) -> dict:
         if e and "@" in e:
             result.setdefault(e, (nombre or "").strip() or e)
 
-    _add(actividad_data.get("email", ""), actividad_data.get("lider_actividad", ""))
+    # Líder de actividad (solo si el campo email está guardado explícitamente en Firestore)
     _add(actividad_data.get("lider_actividad_email", ""), actividad_data.get("lider_actividad", ""))
+    # Personal operativo asignado
     for p in (actividad_data.get("personal_asignado") or []):
         _add(p.get("email", ""), p.get("nombre_completo", ""))
     return result
+
+
+async def _resolver_lider_actividad_async(actividad_data: dict) -> tuple[str, str]:
+    """Resuelve (email, nombre) del líder de la actividad.
+
+    Primero intenta `lider_actividad_email` (campo directo en Firestore).
+    Si está vacío, busca por nombre completo en la colección `users` filtrando
+    por rol=lider. Retorna ("", nombre) si no se puede resolver el email.
+    """
+    lider_email = (actividad_data.get("lider_actividad_email") or "").strip().lower()
+    lider_nombre = (actividad_data.get("lider_actividad") or "").strip()
+    if lider_email and "@" in lider_email:
+        return lider_email, lider_nombre
+    if not lider_nombre:
+        return "", ""
+    target = strip_accents(lider_nombre).strip().lower()
+    try:
+        seen: set[str] = set()
+        for rol_field in ("role", "rol"):
+            try:
+                docs = await asyncio.to_thread(
+                    lambda rf=rol_field: list(
+                        db.collection("users")
+                        .where(rf, "in", ["lider", "líder", "LIDER", "LÍDER"])
+                        .limit(500)
+                        .stream()
+                    )
+                )
+            except Exception:
+                continue
+            for udoc in docs:
+                if udoc.id in seen:
+                    continue
+                seen.add(udoc.id)
+                ud = udoc.to_dict() or {}
+                for campo_nombre in ("full_name", "nombre_completo", "displayName"):
+                    nombre_db = (ud.get(campo_nombre) or "").strip()
+                    if nombre_db and strip_accents(nombre_db).strip().lower() == target:
+                        email_found = (ud.get("email") or "").strip().lower()
+                        if email_found and "@" in email_found:
+                            return email_found, nombre_db or lider_nombre
+    except Exception as e:
+        logger.warning(f"[NOTIFY] Error resolviendo email del líder '{lider_nombre}': {e}")
+    return "", lider_nombre
 import math
 import os
 import io
@@ -2126,6 +2172,10 @@ async def delete_actividad(actividad_id: str, background_tasks: BackgroundTasks 
         # Enviar correos de cancelación en background (no bloquea la respuesta)
         async def _enviar_cancelaciones():
             destinatarios = _resolver_destinatarios_actividad(actividad_data_cancel)
+            # Resolver líder de actividad por nombre si no hay email directo en Firestore
+            lider_email_canc, lider_nombre_canc = await _resolver_lider_actividad_async(actividad_data_cancel)
+            if lider_email_canc:
+                destinatarios.setdefault(lider_email_canc, lider_nombre_canc or lider_email_canc)
             # Incluir también líderes de los grupos requeridos
             grupos_req = actividad_data_cancel.get("grupos_requeridos") or []
             if grupos_req:
@@ -2449,6 +2499,10 @@ async def update_actividad(
 
             async def _enviar_modificacion():
                 destinatarios = _resolver_destinatarios_actividad(_updated_snapshot)
+                # Resolver líder de actividad por nombre si no hay email directo en Firestore
+                lider_email_mod, lider_nombre_mod = await _resolver_lider_actividad_async(_updated_snapshot)
+                if lider_email_mod:
+                    destinatarios.setdefault(lider_email_mod, lider_nombre_mod or lider_email_mod)
                 logger.info(
                     f"[MODIF] Cambios detectados: {[c['campo'] for c in _cambios_snapshot]}. "
                     f"Enviando a {len(destinatarios)} destinatario(s): {list(destinatarios.keys())}"
