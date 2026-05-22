@@ -430,20 +430,36 @@ def send_leaders_notification_email(
     leader_name: str,
     actividad_data: dict,
     app_url: str = None,
+    lider_nombre: str = None,
+    lider_telefono: str = None,
 ) -> bool:
-    """Notifica al líder de un grupo sobre nueva actividad que requiere asignación."""
+    """Notifica al líder de un grupo sobre nueva actividad que requiere asignación.
+
+    `lider_nombre` y `lider_telefono` son del LÍDER de la actividad (no del coordinador).
+    Si se proveen, sobreescriben los valores de la plantilla de detalles.
+    """
     try:
         fecha = actividad_data.get('fecha_actividad', '')
         subject = f"Nueva Actividad DAGMA — Asignar Personal — {fecha}"
-        app_url = app_url or os.getenv('FRONTEND_URL', 'https://dagma-360-capture.vercel.app')
+        app_url = app_url or os.getenv('FRONTEND_URL', 'https://dagma-360-capture-frontend.vercel.app')
+        # Deep-link directo a la sección de convocatorias (programación de actividades).
+        # Si el usuario no está autenticado, la app lo llevará al login primero.
+        sep = '&' if '?' in app_url else '?'
+        deep_link = f"{app_url}{sep}view=convocatorias"
+        # Construir vista con datos del LÍDER de la actividad en vez del coordinador.
+        actividad_view = dict(actividad_data)
+        if lider_nombre:
+            actividad_view['lider_actividad'] = lider_nombre
+        if lider_telefono:
+            actividad_view['telefono'] = lider_telefono
         html = _render_template('leaders_request.html', {
             'subject': subject,
             'header_color': '#1b5e20',
             'header_title': 'DAGMA — Nueva Actividad Programada',
             'header_subtitle': 'Se requiere asignación de personal',
             'leader_name': leader_name,
-            'actividad': actividad_data,
-            'app_url': app_url,
+            'actividad': actividad_view,
+            'app_url': deep_link,
         })
         ics = generate_ics(actividad_data)
         return _send_email(leader_email, subject, html,
@@ -503,7 +519,7 @@ def send_activity_leader_assigned_email(
     try:
         fecha = actividad_data.get('fecha_actividad', '')
         subject = f"Asignación como Líder de Actividad DAGMA — {fecha}"
-        app_url = app_url or os.getenv('FRONTEND_URL', 'https://dagma-360-capture.vercel.app')
+        app_url = app_url or os.getenv('FRONTEND_URL', 'https://dagma-360-capture-frontend.vercel.app')
         html = _render_template('activity_leader_assigned.html', {
             'subject': subject,
             'header_color': '#2e7d32',
@@ -535,7 +551,7 @@ def send_assignment_summary_leader_email(
             return True  # nada que reportar
         fecha = actividad_data.get('fecha_actividad', '')
         subject = f"Resumen de asignación — Actividad DAGMA {fecha}"
-        app_url = app_url or os.getenv('FRONTEND_URL', 'https://dagma-360-capture.vercel.app')
+        app_url = app_url or os.getenv('FRONTEND_URL', 'https://dagma-360-capture-frontend.vercel.app')
         html = _render_template('assignment_summary_leader.html', {
             'subject': subject,
             'header_color': '#1565c0',
@@ -550,6 +566,60 @@ def send_assignment_summary_leader_email(
         return _send_email(leader_email, subject, html, template='assignment_summary_leader')
     except Exception as e:
         logger.error(f"[EMAIL] Error enviando resumen líder a {leader_email}: {e}")
+        return False
+
+
+def send_activity_cancellation_email(
+    to_email: str,
+    nombre: str,
+    actividad_data: dict,
+) -> bool:
+    """Notifica la cancelación de una actividad a un destinatario."""
+    try:
+        fecha = actividad_data.get('fecha_actividad', '')
+        subject = f"CANCELACIÓN — Actividad Ambiental DAGMA — {fecha}"
+        html = _render_template('activity_cancellation.html', {
+            'subject': subject,
+            'header_color': '#b71c1c',
+            'header_title': 'DAGMA — Actividad Cancelada',
+            'header_subtitle': 'Esta actividad ha sido cancelada',
+            'nombre': nombre,
+            'actividad': actividad_data,
+        })
+        return _send_email(to_email, subject, html, template='activity_cancellation')
+    except Exception as e:
+        logger.error(f"[EMAIL] Error enviando cancelación a {to_email}: {e}")
+        return False
+
+
+def send_activity_modification_email(
+    to_email: str,
+    nombre: str,
+    actividad_data: dict,
+    cambios: list,
+    app_url: str = None,
+) -> bool:
+    """Notifica modificaciones en una actividad indicando qué campos cambiaron.
+
+    `cambios` es una lista de dicts: [{"campo": str, "antes": str, "despues": str}].
+    """
+    try:
+        fecha = actividad_data.get('fecha_actividad', '')
+        subject = f"MODIFICACIÓN — Actividad Ambiental DAGMA — {fecha}"
+        app_url = app_url or os.getenv('FRONTEND_URL', 'https://dagma-360-capture-frontend.vercel.app')
+        html = _render_template('activity_modification.html', {
+            'subject': subject,
+            'header_color': '#f57f17',
+            'header_title': 'DAGMA — Modificación de Actividad',
+            'header_subtitle': 'Se han realizado cambios en la actividad',
+            'nombre': nombre,
+            'actividad': actividad_data,
+            'cambios': cambios or [],
+            'app_url': app_url,
+        })
+        return _send_email(to_email, subject, html, template='activity_modification')
+    except Exception as e:
+        logger.error(f"[EMAIL] Error enviando modificación a {to_email}: {e}")
         return False
 
 
@@ -652,7 +722,7 @@ def send_weekly_attendance_report_email(
     """Envía el reporte ejecutivo semanal de asistencia al líder de un grupo."""
     try:
         subject = f"Reporte Semanal de Asistencia — {grupo} ({period_start} a {period_end})"
-        app_url = app_url or os.getenv('FRONTEND_URL', 'https://dagma-360-capture.vercel.app')
+        app_url = app_url or os.getenv('FRONTEND_URL', 'https://dagma-360-capture-frontend.vercel.app')
         html = _render_template('weekly_attendance_leader.html', {
             'subject': subject,
             'header_color': '#2e7d32',

@@ -20,11 +20,6 @@ https://www.google.com/maps?q={{ coords[1] }},{{ coords[0] }}
 {%- set p = actividad.get('punto_encuentro') or {} -%}
 {%- set direccion = p.get('direccion', 'N/A') if p is mapping else 'N/A' -%}
 {%- set mu = maps_url(actividad) -%}
-{%- if mu %}
-{%- set punto_html = direccion ~ ' &mdash; <a href="' ~ mu ~ '" style="color:#1a73e8;">Ver en Google Maps</a>' -%}
-{%- else %}
-{%- set punto_html = direccion -%}
-{%- endif %}
 <table style="border-collapse:collapse;width:100%;font-family:Arial,sans-serif;font-size:14px;margin:8px 0 16px;">
   {{ info_row('Fecha', actividad.get('fecha_actividad', 'N/A')) }}
   {{ info_row('Hora de encuentro', actividad.get('hora_encuentro', 'N/A')) }}
@@ -34,7 +29,12 @@ https://www.google.com/maps?q={{ coords[1] }},{{ coords[0] }}
   {{ info_row('Grupos requeridos', (actividad.get('grupos_requeridos') or []) | join(', ') or 'N/A') }}
   {{ info_row('Líder', actividad.get('lider_actividad', 'N/A')) }}
   {{ info_row('Teléfono de contacto', actividad.get('telefono', 'N/A')) }}
-  {{ info_row('Punto de encuentro', punto_html) }}
+  <tr>
+    <td style="padding:8px 12px;background:#f5f5f5;font-weight:bold;white-space:nowrap;border-bottom:1px solid #eee;">Punto de encuentro</td>
+    <td style="padding:8px 12px;border-bottom:1px solid #eee;">
+      {{ direccion }}{% if mu %} &mdash; <a href="{{ mu }}" style="color:#1a73e8;">Ver en Google Maps</a>{% endif %}
+    </td>
+  </tr>
   {{ info_row('Observaciones', actividad.get('observaciones') or 'Ninguna') }}
 </table>
 {%- endmacro %}

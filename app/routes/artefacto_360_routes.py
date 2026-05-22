@@ -14,6 +14,26 @@ import uuid
 
 # Conjunto para mantener referencias fuertes a background tasks (evita garbage collection)
 _background_tasks = set()
+
+
+def _resolver_destinatarios_actividad(actividad_data: dict) -> dict:
+    """Retorna {email_lower: nombre} para coordinador, líder y personal asignado de una actividad.
+
+    No incluye líderes de grupos (requieren consulta a Firestore; se resuelven por separado
+    en los flujos asíncronos de cancelación/modificación).
+    """
+    result: dict[str, str] = {}
+
+    def _add(email: str, nombre: str) -> None:
+        e = (email or "").strip().lower()
+        if e and "@" in e:
+            result.setdefault(e, (nombre or "").strip() or e)
+
+    _add(actividad_data.get("email", ""), actividad_data.get("lider_actividad", ""))
+    _add(actividad_data.get("lider_actividad_email", ""), actividad_data.get("lider_actividad", ""))
+    for p in (actividad_data.get("personal_asignado") or []):
+        _add(p.get("email", ""), p.get("nombre_completo", ""))
+    return result
 import math
 import os
 import io
@@ -22,7 +42,7 @@ import logging
 from pydantic import BaseModel, Field
 from app.models.validation import CoordinatesModel, ArbolesDataModel
 from app.utils.firestore_async import run_blocking, stream_to_list
-from app.utils.text_utils import normalize_grupo, grupos_match
+from app.utils.text_utils import normalize_grupo, grupos_match, strip_accents
 
 # Importar configuración de Firebase y S3/Storage
 from app.firebase_config import db
@@ -41,6 +61,8 @@ from app.services.gmail_service import (
     send_leaders_notification_email,
     send_activity_leader_assigned_email,
     send_assignment_summary_leader_email,
+    send_activity_cancellation_email,
+    send_activity_modification_email,
 )
 from app.services.calendar_service import create_activity_event, sync_event_personnel
 
@@ -1759,54 +1781,199 @@ async def convocar_actividad(
 
         # Notificaciones por email: se envian en background para no demorar la respuesta.
         def _enviar_notificaciones_actividad():
+            # Helper de comparación de nombres insensible a tildes/espacios/case.
+            def _name_key(s: str | None) -> str:
+                return strip_accents(str(s or "")).strip().lower()
+
+            # Variables compartidas entre secciones B y C: nombre y teléfono del
+            # LÍDER de la actividad (para sobreescribir `telefono` del coordinador
+            # en los correos enviados a los líderes de grupo).
+            _lider_nombre_res = (body.lider_actividad or "").strip()
+            _lider_telefono_res = None
+
+            # ---- A) Confirmación al usuario que programó ----
             try:
                 send_activity_confirmation_email(body.email, actividad_data)
             except Exception as e:
                 logger.warning(f"[GMAIL] Error enviando confirmación: {e}")
 
-            # Email específico al LÍDER de la actividad (si se informó email explícito
-            # o se puede resolver buscando por nombre en colección `users`).
+            # ---- B) Email al LÍDER de la actividad ----
+            # Prioridad: email explícito > resolución por nombre en `users`.
             try:
                 lider_email = (body.lider_actividad_email or "").strip()
                 lider_nombre = (body.lider_actividad or "").strip()
                 if not lider_email and lider_nombre:
-                    # Fallback: buscar usuario por nombre con rol líder.
+                    target = _name_key(lider_nombre)
                     try:
                         for rol_field in ("role", "rol"):
-                            q = (db.collection("users")
-                                 .where(rol_field, "in", ["lider", "líder", "LIDER", "LÍDER"]))
+                            q = db.collection("users").where(
+                                rol_field, "in", ["lider", "líder", "LIDER", "LÍDER"]
+                            )
                             for udoc in q.stream():
                                 ud = udoc.to_dict() or {}
-                                nombre_db = (ud.get("nombre_completo") or ud.get("nombre") or "").strip()
-                                if nombre_db and nombre_db.lower() == lider_nombre.lower():
+                                nombre_db = (
+                                    ud.get("full_name")
+                                    or ud.get("nombre_completo")
+                                    or ud.get("displayName")
+                                    or ud.get("nombre")
+                                    or ""
+                                )
+                                if nombre_db and _name_key(nombre_db) == target:
                                     lider_email = (ud.get("email") or "").strip()
                                     break
                             if lider_email:
                                 break
                     except Exception as e:
-                        logger.debug(f"[GMAIL] No se pudo resolver email del líder por nombre: {e}")
+                        logger.warning(
+                            f"[NOTIFY] No se pudo resolver email del líder por nombre '{lider_nombre}': {e}"
+                        )
                 if lider_email and "@" in lider_email:
+                    # Resolver teléfono del líder para usarlo en correos de grupos (sección C).
                     try:
-                        send_activity_leader_assigned_email(lider_email, lider_nombre, actividad_data)
+                        for udoc in db.collection("users").where(
+                            "email", "==", lider_email
+                        ).limit(1).stream():
+                            ud = udoc.to_dict() or {}
+                            tel_raw = ud.get("cellphone") or ud.get("telefono")
+                            if tel_raw not in (None, ""):
+                                _lider_telefono_res = str(tel_raw).strip()
+                            _lider_nombre_res = (
+                                ud.get("full_name")
+                                or ud.get("nombre_completo")
+                                or ud.get("displayName")
+                                or lider_nombre
+                            ) or lider_nombre
+                            break
+                    except Exception:
+                        pass
+                    try:
+                        send_activity_leader_assigned_email(
+                            lider_email, lider_nombre, actividad_data
+                        )
+                        logger.info(
+                            f"[NOTIFY] Líder de actividad notificado: {lider_email}"
+                        )
                     except Exception as e:
-                        logger.warning(f"[GMAIL] Error notificando líder de actividad {lider_email}: {e}")
+                        logger.warning(
+                            f"[GMAIL] Error notificando líder de actividad {lider_email}: {e}"
+                        )
+                else:
+                    logger.warning(
+                        f"[NOTIFY] No se encontró email para líder de actividad '{lider_nombre}'"
+                    )
             except Exception as e:
                 logger.warning(f"[GMAIL] Error en flujo líder-de-actividad: {e}")
+
+            # ---- C) Email a los líderes de los GRUPOS REQUERIDOS ----
             try:
-                app_url = os.getenv('FRONTEND_URL', 'https://dagma-360-capture.vercel.app')
-                # FIX (BUG #5): solo notificar a los líderes de los grupos en
-                # `grupos_requeridos`, no a TODOS los grupos del sistema.
+                app_url = os.getenv(
+                    "FRONTEND_URL", "https://dagma-360-capture-frontend.vercel.app"
+                )
+                notify_institutional = os.getenv(
+                    "NOTIFY_GROUP_INSTITUTIONAL_EMAIL", "false"
+                ).strip().lower() in ("1", "true", "yes")
+
                 grupos_requeridos_norm = {
                     normalize_grupo(g) for g in (body.grupos_requeridos or []) if g
                 }
                 if not grupos_requeridos_norm:
-                    logger.info("[GMAIL] No hay grupos_requeridos; no se notifica a líderes de grupo")
+                    logger.info(
+                        "[NOTIFY] No hay grupos_requeridos; no se notifica a líderes de grupo"
+                    )
                     return
 
-                # Indexar líderes por grupo normalizado, usando primero la colección
-                # `grupos` y, si falta info, completando con `users` (rol lider).
-                lideres_por_grupo: dict[str, list[dict]] = {}
+                logger.info(
+                    f"[NOTIFY] grupos_requeridos_norm={sorted(grupos_requeridos_norm)}"
+                )
 
+                # Índice destinatarios por clave de grupo normalizada.
+                lideres_por_grupo: dict[str, list[dict]] = {
+                    k: [] for k in grupos_requeridos_norm
+                }
+                fuentes_count: dict[str, dict[str, int]] = {
+                    k: {"users": 0, "lideres_grupos": 0, "grupos": 0, "institucional": 0}
+                    for k in grupos_requeridos_norm
+                }
+
+                def _add(clave: str, email: str, nombre: str, fuente: str) -> None:
+                    if not clave or clave not in lideres_por_grupo:
+                        return
+                    e = (email or "").strip()
+                    if not e or "@" not in e:
+                        return
+                    lideres_por_grupo[clave].append(
+                        {"email": e, "nombre": (nombre or "").strip() or e}
+                    )
+                    fuentes_count[clave][fuente] = fuentes_count[clave].get(fuente, 0) + 1
+
+                # Fuente PRIMARIA: users con role/rol == lider
+                try:
+                    seen_uids: set[str] = set()
+                    for rol_field in ("role", "rol"):
+                        try:
+                            qs = (
+                                db.collection("users")
+                                .where(
+                                    rol_field,
+                                    "in",
+                                    ["lider", "líder", "LIDER", "LÍDER"],
+                                )
+                                .limit(1000)
+                                .stream()
+                            )
+                        except Exception as e:
+                            logger.debug(f"[NOTIFY] users.where({rol_field}) falló: {e}")
+                            continue
+                        for udoc in qs:
+                            if udoc.id in seen_uids:
+                                continue
+                            seen_uids.add(udoc.id)
+                            ud = udoc.to_dict() or {}
+                            clave = normalize_grupo(ud.get("grupo"))
+                            if clave not in grupos_requeridos_norm:
+                                continue
+                            email = (ud.get("email") or "").strip()
+                            nombre = (
+                                ud.get("full_name")
+                                or ud.get("nombre_completo")
+                                or ud.get("displayName")
+                                or ud.get("nombre")
+                                or email
+                            )
+                            _add(clave, email, nombre, "users")
+                except Exception as e:
+                    logger.warning(f"[NOTIFY] Error consultando users (líderes): {e}")
+
+                # Fuente SECUNDARIA: colección `lideres_grupos` (xlsx)
+                try:
+                    for ldoc in db.collection("lideres_grupos").stream():
+                        ld = ldoc.to_dict() or {}
+                        clave = normalize_grupo(
+                            ld.get("grupo") or ld.get("Grupo") or ""
+                        )
+                        if clave not in grupos_requeridos_norm:
+                            continue
+                        email = (
+                            ld.get("email")
+                            or ld.get("Email")
+                            or ld.get("correo")
+                            or ld.get("Correo")
+                            or ""
+                        ).strip()
+                        nombre = (
+                            ld.get("nombre_completo")
+                            or ld.get("Nombre completo")
+                            or ld.get("nombre")
+                            or ld.get("Nombre")
+                            or ld.get("lider")
+                            or ld.get("Lider")
+                            or ""
+                        )
+                        _add(clave, email, nombre, "lideres_grupos")
+                except Exception as e:
+                    logger.debug(f"[NOTIFY] Error leyendo lideres_grupos: {e}")
+
+                # Fuente TERCIARIA: colección `grupos` (lider.email + institucional opcional)
                 try:
                     for gdoc in db.collection("grupos").stream():
                         gdata = gdoc.to_dict() or {}
@@ -1815,61 +1982,44 @@ async def convocar_actividad(
                         if clave not in grupos_requeridos_norm:
                             continue
                         lider_raw = gdata.get("lider")
+                        l_email, l_nombre = "", ""
                         if isinstance(lider_raw, dict):
                             l_email = (lider_raw.get("email") or "").strip()
                             l_nombre = (lider_raw.get("nombre") or "").strip()
                         elif isinstance(lider_raw, str):
                             s = lider_raw.strip()
                             if "@" in s:
-                                l_email, l_nombre = s, ""
+                                l_email = s
                             else:
-                                l_email, l_nombre = "", s
-                        else:
-                            l_email, l_nombre = "", ""
-                        if not l_email:
-                            l_email = (gdata.get("email") or "").strip()
-                        if not l_nombre:
-                            l_nombre = (gdata.get("nombre") or "").strip()
+                                l_nombre = s
                         if l_email and "@" in l_email:
-                            lideres_por_grupo.setdefault(clave, []).append(
-                                {"email": l_email, "nombre": l_nombre}
-                            )
+                            _add(clave, l_email, l_nombre or nombre_grupo, "grupos")
+                        # Correo institucional del grupo: opt-in vía env.
+                        if notify_institutional:
+                            inst = (gdata.get("email") or "").strip()
+                            if inst and "@" in inst:
+                                _add(clave, inst, nombre_grupo, "institucional")
                 except Exception as e:
-                    logger.debug(f"[GMAIL] Error indexando colección grupos: {e}")
+                    logger.debug(f"[NOTIFY] Error leyendo grupos: {e}")
 
-                # Fallback: completar con users donde role/rol == lider y grupo coincide.
-                grupos_sin_lider = grupos_requeridos_norm - set(lideres_por_grupo.keys())
-                if grupos_sin_lider:
-                    try:
-                        for rol_field in ("role", "rol"):
-                            try:
-                                qs = db.collection("users").where(
-                                    rol_field, "in", ["lider", "líder", "LIDER", "LÍDER"]
-                                ).limit(500).stream()
-                            except Exception:
-                                qs = []
-                            for udoc in qs:
-                                ud = udoc.to_dict() or {}
-                                clave = normalize_grupo(ud.get("grupo"))
-                                if clave not in grupos_sin_lider:
-                                    continue
-                                u_email = (ud.get("email") or "").strip()
-                                u_nombre = (
-                                    ud.get("full_name")
-                                    or ud.get("nombre_completo")
-                                    or ud.get("displayName")
-                                    or u_email
-                                )
-                                if u_email and "@" in u_email:
-                                    lideres_por_grupo.setdefault(clave, []).append(
-                                        {"email": u_email, "nombre": u_nombre}
-                                    )
-                    except Exception as e:
-                        logger.debug(f"[GMAIL] Fallback users-by-grupo falló: {e}")
-
-                # Despachar correos sin duplicar destinatarios.
+                # Despachar correos deduplicando por email global.
                 ya_enviados: set[str] = set()
+                envios_ok = 0
                 for clave, lideres in lideres_por_grupo.items():
+                    fc = fuentes_count.get(clave, {})
+                    total = len(lideres)
+                    logger.info(
+                        f"[NOTIFY] grupo={clave} fuentes=users:{fc.get('users',0)} "
+                        f"lideres_grupos:{fc.get('lideres_grupos',0)} "
+                        f"grupos:{fc.get('grupos',0)} "
+                        f"institucional:{fc.get('institucional',0)} total={total}"
+                    )
+                    if total == 0:
+                        logger.warning(
+                            f"[NOTIFY] grupo SIN destinatarios: {clave} — "
+                            f"no se enviará correo de aviso"
+                        )
+                        continue
                     for lider in lideres:
                         email_to = lider["email"].lower()
                         if email_to in ya_enviados:
@@ -1877,14 +2027,27 @@ async def convocar_actividad(
                         ya_enviados.add(email_to)
                         try:
                             send_leaders_notification_email(
-                                lider["email"], lider["nombre"], actividad_data, app_url
+                                lider["email"], lider["nombre"], actividad_data, app_url,
+                                lider_nombre=_lider_nombre_res or None,
+                                lider_telefono=_lider_telefono_res,
+                            )
+                            envios_ok += 1
+                            logger.info(
+                                f"[NOTIFY] envío OK a {lider['email']} (grupo={clave})"
                             )
                         except Exception as e:
                             logger.warning(
-                                f"[GMAIL] Error notificando lider {lider['email']}: {e}"
+                                f"[GMAIL] Error notificando lider {lider['email']} "
+                                f"(grupo={clave}): {e}"
                             )
+                logger.info(
+                    f"[NOTIFY] Resumen: grupos={len(grupos_requeridos_norm)} "
+                    f"destinatarios_unicos={len(ya_enviados)} envios_ok={envios_ok}"
+                )
             except Exception as e:
-                logger.warning(f"[GMAIL] Error notificando líderes de grupos requeridos: {e}")
+                logger.warning(
+                    f"[GMAIL] Error notificando líderes de grupos requeridos: {e}"
+                )
 
         if background_tasks is not None:
             background_tasks.add_task(_enviar_notificaciones_actividad)
@@ -1930,9 +2093,9 @@ async def convocar_actividad(
 ```
     """
 )
-async def delete_actividad(actividad_id: str):
+async def delete_actividad(actividad_id: str, background_tasks: BackgroundTasks = None):
     """
-    Eliminar actividad por ID
+    Eliminar actividad por ID. Envía correo de cancelación a coordinador, líder y personal asignado.
     """
     try:
         collection_ref = db.collection("plan_distrito_verde")
@@ -1942,25 +2105,75 @@ async def delete_actividad(actividad_id: str):
         doc_snapshot = await run_blocking(doc_ref.get)
 
         if doc_snapshot.exists:
+            actividad_data_cancel = doc_snapshot.to_dict() or {}
+            actividad_data_cancel['id'] = actividad_id
             await run_blocking(doc_ref.delete)
-            return {
-                "success": True,
-                "id": actividad_id,
-                "message": "Actividad eliminada exitosamente",
-                "timestamp": datetime.now(timezone.utc).isoformat()
-            }
+        else:
+            # Fallback: buscar por campo interno 'id'
+            docs = await stream_to_list(collection_ref.where("id", "==", actividad_id).limit(1))
+            matching_doc = docs[0] if docs else None
 
-        # Fallback: buscar por campo interno 'id'
-        docs = await stream_to_list(collection_ref.where("id", "==", actividad_id).limit(1))
-        matching_doc = docs[0] if docs else None
+            if not matching_doc:
+                raise HTTPException(
+                    status_code=404,
+                    detail=f"No se encontró actividad con id: {actividad_id}"
+                )
 
-        if not matching_doc:
-            raise HTTPException(
-                status_code=404,
-                detail=f"No se encontró actividad con id: {actividad_id}"
-            )
+            actividad_data_cancel = matching_doc.to_dict() or {}
+            actividad_data_cancel['id'] = actividad_id
+            await run_blocking(collection_ref.document(matching_doc.id).delete)
 
-        await run_blocking(collection_ref.document(matching_doc.id).delete)
+        # Enviar correos de cancelación en background (no bloquea la respuesta)
+        async def _enviar_cancelaciones():
+            destinatarios = _resolver_destinatarios_actividad(actividad_data_cancel)
+            # Incluir también líderes de los grupos requeridos
+            grupos_req = actividad_data_cancel.get("grupos_requeridos") or []
+            if grupos_req:
+                try:
+                    grupos_norm = {normalize_grupo(g) for g in grupos_req if g}
+                    seen_uids: set = set()
+                    for rol_field in ("role", "rol"):
+                        try:
+                            qs = (
+                                db.collection("users")
+                                .where(rol_field, "in", ["lider", "líder", "LIDER", "LÍDER"])
+                                .limit(200)
+                                .stream()
+                            )
+                        except Exception:
+                            continue
+                        for udoc in await asyncio.to_thread(lambda s=qs: list(s)):
+                            if udoc.id in seen_uids:
+                                continue
+                            seen_uids.add(udoc.id)
+                            ud = udoc.to_dict() or {}
+                            if normalize_grupo(ud.get("grupo")) not in grupos_norm:
+                                continue
+                            email = (ud.get("email") or "").strip().lower()
+                            if email and "@" in email:
+                                destinatarios.setdefault(
+                                    email,
+                                    ud.get("full_name") or ud.get("nombre_completo") or email,
+                                )
+                except Exception as e:
+                    logger.warning(f"[CANCEL] Error resolviendo líderes de grupo: {e}")
+
+            logger.info(f"[CANCEL] Enviando cancelación a {len(destinatarios)} destinatario(s)")
+            for email_addr, nombre_addr in destinatarios.items():
+                try:
+                    await asyncio.to_thread(
+                        send_activity_cancellation_email,
+                        to_email=email_addr,
+                        nombre=nombre_addr,
+                        actividad_data=actividad_data_cancel,
+                    )
+                    logger.info(f"[CANCEL] Correo enviado a {email_addr}")
+                except Exception as e:
+                    logger.warning(f"[CANCEL] Error enviando a {email_addr}: {e}")
+
+        task = asyncio.create_task(_enviar_cancelaciones())
+        _background_tasks.add(task)
+        task.add_done_callback(_background_tasks.discard)
 
         return {
             "success": True,
@@ -2186,6 +2399,78 @@ async def update_actividad(
             else:
                 logger.info("[EMAIL] Sin cambios en personal_asignado, no se envian emails")
 
+        # --- Detectar cambios en campos principales de la actividad (no personal) ---
+        _CAMPOS_MODIFICACION = {
+            "fecha_actividad": "Fecha",
+            "hora_encuentro": "Hora de encuentro",
+            "tipo_jornada": "Tipo de jornada",
+            "duracion_actividad": "Duración",
+            "objetivo_actividad": "Objetivo",
+            "lider_actividad": "Líder",
+            "grupos_requeridos": "Grupos requeridos",
+            "punto_encuentro": "Punto de encuentro",
+            "observaciones": "Observaciones",
+        }
+        campos_en_body = {k for k in _CAMPOS_MODIFICACION if k in body}
+        cambios_detectados = []
+        for campo in campos_en_body:
+            antes = data_anterior.get(campo)
+            despues = updated_data.get(campo)
+            if antes != despues:
+                if campo == "punto_encuentro":
+                    antes_str = (antes or {}).get("direccion", str(antes or "")) if isinstance(antes, dict) else str(antes or "")
+                    despues_str = (despues or {}).get("direccion", str(despues or "")) if isinstance(despues, dict) else str(despues or "")
+                elif campo == "grupos_requeridos":
+                    antes_str = ", ".join(sorted(antes or []))
+                    despues_str = ", ".join(sorted(despues or []))
+                    # Ignore order-only differences
+                    if sorted(antes or []) == sorted(despues or []):
+                        continue
+                else:
+                    antes_str = str(antes or "")
+                    despues_str = str(despues or "")
+                cambios_detectados.append({
+                    "campo": _CAMPOS_MODIFICACION[campo],
+                    "antes": antes_str,
+                    "despues": despues_str,
+                })
+
+        if not cambios_detectados:
+            logger.info(
+                f"[MODIF] Sin cambios en campos rastreados para actividad {actividad_id}. "
+                f"Campos en body: {list(campos_en_body)}"
+            )
+
+        if cambios_detectados:
+            app_url_mod = os.getenv("FRONTEND_URL", "https://dagma-360-capture-frontend.vercel.app")
+            # Capturar copias inmutables para la closure async (evita race conditions)
+            _cambios_snapshot = list(cambios_detectados)
+            _updated_snapshot = dict(updated_data)
+
+            async def _enviar_modificacion():
+                destinatarios = _resolver_destinatarios_actividad(_updated_snapshot)
+                logger.info(
+                    f"[MODIF] Cambios detectados: {[c['campo'] for c in _cambios_snapshot]}. "
+                    f"Enviando a {len(destinatarios)} destinatario(s): {list(destinatarios.keys())}"
+                )
+                for email_addr, nombre_addr in destinatarios.items():
+                    try:
+                        await asyncio.to_thread(
+                            send_activity_modification_email,
+                            to_email=email_addr,
+                            nombre=nombre_addr,
+                            actividad_data=_updated_snapshot,
+                            cambios=_cambios_snapshot,
+                            app_url=app_url_mod,
+                        )
+                        logger.info(f"[MODIF] Correo enviado a {email_addr}")
+                    except Exception as e:
+                        logger.warning(f"[MODIF] Error enviando a {email_addr}: {e}")
+
+            task = asyncio.create_task(_enviar_modificacion())
+            _background_tasks.add(task)
+            task.add_done_callback(_background_tasks.discard)
+
         return {
             "success": True,
             "id": actividad_id,
@@ -2263,7 +2548,7 @@ async def crear_personal_operativo(
             "nombre_completo": body.nombre_completo.strip(),
             "email": body.email.strip(),
             "numero_contacto": body.numero_contacto,
-            "grupo": body.grupo.strip(),
+            "grupo": normalize_grupo(body.grupo),
             "fecha_creacion": ahora,
         }
 
@@ -2318,7 +2603,7 @@ async def get_personal_operativo(
         query = ref
 
         if grupo:
-            query = query.where("grupo", "==", grupo.strip())
+            query = query.where("grupo", "==", normalize_grupo(grupo))
 
         docs = await stream_to_list(query)
 
@@ -2333,7 +2618,7 @@ async def get_personal_operativo(
             "status": "success",
             "data": personal,
             "count": len(personal),
-            "filters": {"grupo": grupo.strip() if grupo else None},
+            "filters": {"grupo": normalize_grupo(grupo) if grupo else None},
             "timestamp": datetime.now(pytz.timezone("America/Bogota")).isoformat(),
         }
     except Exception as e:
@@ -2396,7 +2681,7 @@ async def verificar_registro_personal(
                     emails.add(email_u)
 
             ref = db.collection("personal_operativo")
-            q = ref.where("grupo", "==", grupo.strip()) if grupo else ref
+            q = ref.where("grupo", "==", normalize_grupo(grupo)) if grupo else ref
             personal_docs = list(q.stream())
             return emails, personal_docs
 
@@ -2441,7 +2726,7 @@ async def verificar_registro_personal(
             "total_procesados": len(detalle),
             "registrados": registrados,
             "no_registrados": no_registrados,
-            "filtro_grupo": grupo.strip() if grupo else None,
+            "filtro_grupo": normalize_grupo(grupo) if grupo else None,
             "verificado_en": ahora,
             "detalle": detalle,
         }
@@ -2528,13 +2813,13 @@ async def get_reportes_intervenciones_todos(
     Soporta paginación (?page=1&per_page=30) y proyección de campos (?slim=true).
     Las presigned URLs de S3 se generan solo para los registros de la página actual.
     """
-    if grupo and grupo.strip().lower() not in _GRUPOS_KEYS:
+    if grupo and normalize_grupo(grupo) not in _GRUPOS_KEYS:
         raise HTTPException(
             status_code=400,
             detail=f"grupo debe ser uno de: {', '.join(_GRUPOS_KEYS)}"
         )
 
-    grupos_a_consultar = [grupo.strip().lower()] if grupo else _GRUPOS_KEYS
+    grupos_a_consultar = [normalize_grupo(grupo)] if grupo else _GRUPOS_KEYS
 
     tasks = [
         _fetch_grupo_reportes(g, id_actividad, None)
@@ -2588,7 +2873,7 @@ async def get_reportes_intervenciones_todos(
         "totals": totals,
         "total_general": total_general,
         "filters": {
-            "grupo": grupo.strip().lower() if grupo else None,
+            "grupo": normalize_grupo(grupo) if grupo else None,
             "id_actividad": id_actividad.strip() if id_actividad else None,
             "slim": slim,
         },
@@ -2876,7 +3161,7 @@ async def get_asistencias_resumen(
             # Filtro por grupo (si se especifica)
             if grupo:
                 tiene_grupo = any(
-                    (p.get("grupo") or "").strip().lower() == grupo.strip().lower()
+                    grupos_match(p.get("grupo"), grupo)
                     for p in personal_list
                 )
                 if not tiene_grupo:

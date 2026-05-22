@@ -1,0 +1,17 @@
+{% extends "_base.html" %}
+{% import "_macros.html" as m %}
+
+{% block content %}
+<p>{% if nombre %}Estimado/a <strong>{{ nombre }}</strong>,{% else %}Estimado/a,{% endif %}</p>
+<p style="color:#b71c1c;font-size:15px;font-weight:bold;border-left:4px solid #b71c1c;padding-left:12px;margin:16px 0;">
+  ⚠️ La actividad ambiental programada para el
+  <strong>{{ actividad.get('fecha_actividad', 'N/A') }}</strong>
+  ha sido <strong>CANCELADA</strong>.
+</p>
+<p>A continuación encontrará los detalles de la actividad que fue cancelada:</p>
+<h3 style="color:#b71c1c;margin:18px 0 8px;">Detalles de la Actividad Cancelada</h3>
+{{ m.activity_details_table(actividad) }}
+<p style="font-size:13px;color:#555;margin-top:16px;background:#fce4e4;padding:12px;border-radius:4px;">
+  Si tiene dudas sobre esta cancelación, comuníquese con el coordinador de su grupo.
+</p>
+{% endblock %}

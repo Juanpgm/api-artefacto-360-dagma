@@ -1,0 +1,38 @@
+{% extends "_base.html" %}
+{% import "_macros.html" as m %}
+
+{% block content %}
+<p>{% if nombre %}Estimado/a <strong>{{ nombre }}</strong>,{% else %}Estimado/a,{% endif %}</p>
+<p style="font-size:14px;border-left:4px solid #f57f17;padding-left:12px;margin:16px 0;">
+  La actividad ambiental programada para el
+  <strong>{{ actividad.get('fecha_actividad', 'N/A') }}</strong>
+  ha sido <strong>modificada</strong>. A continuación se detallan los cambios realizados.
+</p>
+
+{% if cambios %}
+<h3 style="color:#e65100;margin:18px 0 8px;">Cambios Realizados</h3>
+<table style="border-collapse:collapse;width:100%;font-family:Arial,sans-serif;font-size:14px;margin:8px 0 20px;">
+  <tr>
+    <th style="padding:9px 12px;background:#f57f17;color:#fff;text-align:left;font-weight:bold;">Campo</th>
+    <th style="padding:9px 12px;background:#f57f17;color:#fff;text-align:left;font-weight:bold;">Valor anterior</th>
+    <th style="padding:9px 12px;background:#f57f17;color:#fff;text-align:left;font-weight:bold;">Nuevo valor</th>
+  </tr>
+  {% for c in cambios %}
+  <tr>
+    <td style="padding:8px 12px;background:#fff8e1;font-weight:bold;border-bottom:1px solid #ffe082;">{{ c.campo }}</td>
+    <td style="padding:8px 12px;border-bottom:1px solid #ffe082;color:#b71c1c;">{{ c.antes if c.antes else '—' }}</td>
+    <td style="padding:8px 12px;border-bottom:1px solid #ffe082;color:#1b5e20;">{{ c.despues if c.despues else '—' }}</td>
+  </tr>
+  {% endfor %}
+</table>
+{% endif %}
+
+<h3 style="color:#e65100;margin:18px 0 8px;">Datos Actualizados de la Actividad</h3>
+{{ m.activity_details_table(actividad) }}
+{% if app_url %}
+{{ m.cta_button(app_url, 'Ver en la App', '#e65100') }}
+{% endif %}
+<p style="font-size:13px;color:#666;margin-top:16px;">
+  Si tiene dudas sobre estos cambios, comuníquese con el coordinador de su grupo.
+</p>
+{% endblock %}
