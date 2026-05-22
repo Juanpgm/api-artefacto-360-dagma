@@ -80,6 +80,77 @@ async def _resolver_lider_actividad_async(actividad_data: dict) -> tuple[str, st
     except Exception as e:
         logger.warning(f"[NOTIFY] Error resolviendo email del líder '{lider_nombre}': {e}")
     return "", lider_nombre
+
+
+async def _resolver_lider_telefono_async(lider_email: str, lider_nombre: str) -> "str | None":
+    """Resuelve el teléfono del líder de actividad.
+
+    Orden de búsqueda:
+    1. ``users.cellphone`` / ``users.telefono`` (por email)
+    2. ``personal_operativo.numero_contacto`` (por email)
+    3. ``personal_operativo.numero_contacto`` (por nombre_completo exacto)
+
+    Retorna el teléfono como string o None si no se encuentra.
+    """
+    import logging as _log
+    _logger = _log.getLogger(__name__)
+    # 1. Buscar en users por email
+    if lider_email and "@" in lider_email:
+        try:
+            docs = await asyncio.to_thread(
+                lambda: list(
+                    db.collection("users").where("email", "==", lider_email).limit(1).stream()
+                )
+            )
+            for udoc in docs:
+                ud = udoc.to_dict() or {}
+                tel_raw = ud.get("cellphone") or ud.get("telefono")
+                if tel_raw not in (None, ""):
+                    return str(tel_raw).strip()
+        except Exception:
+            pass
+        # 2. Buscar en personal_operativo por email
+        try:
+            docs = await asyncio.to_thread(
+                lambda: list(
+                    db.collection("personal_operativo")
+                    .where("email", "==", lider_email)
+                    .limit(1)
+                    .stream()
+                )
+            )
+            for udoc in docs:
+                ud = udoc.to_dict() or {}
+                tel_raw = ud.get("numero_contacto")
+                if tel_raw not in (None, ""):
+                    return str(tel_raw).strip()
+        except Exception:
+            pass
+    # 3. Buscar en personal_operativo por nombre_completo
+    if lider_nombre:
+        try:
+            docs = await asyncio.to_thread(
+                lambda: list(
+                    db.collection("personal_operativo")
+                    .where("nombre_completo", "==", lider_nombre.strip())
+                    .limit(1)
+                    .stream()
+                )
+            )
+            for udoc in docs:
+                ud = udoc.to_dict() or {}
+                tel_raw = ud.get("numero_contacto")
+                if tel_raw not in (None, ""):
+                    return str(tel_raw).strip()
+        except Exception:
+            pass
+    _logger.debug(
+        f"[LIDER-TEL] No se pudo resolver teléfono del líder "
+        f"email='{lider_email}' nombre='{lider_nombre}'"
+    )
+    return None
+
+
 import math
 import os
 import io
@@ -1733,6 +1804,7 @@ class ConvocarActividadRequest(BaseModel):
     grupos_requeridos: list[str] = Field(..., description="Lista de grupos requeridos")
     lider_actividad: str = Field(..., description="Líder de la actividad")
     lider_actividad_email: str = Field(None, description="Email del líder de la actividad (opcional). Si se provee, se le enviará una notificación específica como líder.")
+    lider_actividad_telefono: str = Field(None, description="Teléfono del líder de la actividad (opcional). Sobreescribe el campo telefono del coordinador en los correos.")
     punto_encuentro: dict = Field(..., description="Punto de encuentro (geometry, direccion)")
     observaciones: str = Field(None, description="Observaciones")
     telefono: str = Field(..., description="Teléfono de contacto")
@@ -1817,6 +1889,7 @@ async def convocar_actividad(
             "grupos_requeridos": body.grupos_requeridos,
             "lider_actividad": body.lider_actividad,
             "lider_actividad_email": (body.lider_actividad_email or "").strip(),
+            "lider_actividad_telefono": (body.lider_actividad_telefono or "").strip(),
             "punto_encuentro": punto,
             "observaciones": body.observaciones or "",
             "telefono": body.telefono,
@@ -1855,7 +1928,8 @@ async def convocar_actividad(
             # LÍDER de la actividad (para sobreescribir `telefono` del coordinador
             # en los correos enviados a los líderes de grupo).
             _lider_nombre_res = (body.lider_actividad or "").strip()
-            _lider_telefono_res = None
+            # Prefer phone sent from frontend (already resolved from personal_operativo)
+            _lider_telefono_res = (body.lider_actividad_telefono or "").strip() or None
 
             # ---- A) Confirmación al usuario que programó ----
             try:
@@ -1894,7 +1968,7 @@ async def convocar_actividad(
                             f"[NOTIFY] No se pudo resolver email del líder por nombre '{lider_nombre}': {e}"
                         )
                 if lider_email and "@" in lider_email:
-                    # Resolver teléfono del líder para usarlo en correos de grupos (sección C).
+                    # Resolver teléfono del líder: 1) users, 2) personal_operativo por email.
                     try:
                         for udoc in db.collection("users").where(
                             "email", "==", lider_email
@@ -1909,6 +1983,32 @@ async def convocar_actividad(
                                 or ud.get("displayName")
                                 or lider_nombre
                             ) or lider_nombre
+                            break
+                    except Exception:
+                        pass
+                    # Fallback: buscar en personal_operativo por email
+                    if not _lider_telefono_res:
+                        try:
+                            for udoc in db.collection("personal_operativo").where(
+                                "email", "==", lider_email
+                            ).limit(1).stream():
+                                ud = udoc.to_dict() or {}
+                                tel_raw = ud.get("numero_contacto")
+                                if tel_raw not in (None, ""):
+                                    _lider_telefono_res = str(tel_raw).strip()
+                                break
+                        except Exception:
+                            pass
+                # Fallback final: buscar en personal_operativo por nombre_completo
+                if not _lider_telefono_res and lider_nombre:
+                    try:
+                        for udoc in db.collection("personal_operativo").where(
+                            "nombre_completo", "==", lider_nombre.strip()
+                        ).limit(1).stream():
+                            ud = udoc.to_dict() or {}
+                            tel_raw = ud.get("numero_contacto")
+                            if tel_raw not in (None, ""):
+                                _lider_telefono_res = str(tel_raw).strip()
                             break
                     except Exception:
                         pass
@@ -2196,19 +2296,9 @@ async def delete_actividad(actividad_id: str, background_tasks: BackgroundTasks 
             lider_email_canc, lider_nombre_canc = await _resolver_lider_actividad_async(actividad_data_cancel)
             if lider_email_canc:
                 destinatarios.setdefault(lider_email_canc, lider_nombre_canc or lider_email_canc)
-            # Resolver teléfono del líder para no mostrar el del coordinador en el correo
-            lider_telefono_canc = None
-            if lider_email_canc and "@" in lider_email_canc:
-                try:
-                    users_q = db.collection("users").where("email", "==", lider_email_canc).limit(1)
-                    for udoc in await asyncio.to_thread(lambda: list(users_q.stream())):
-                        ud = udoc.to_dict() or {}
-                        tel_raw = ud.get("cellphone") or ud.get("telefono")
-                        if tel_raw not in (None, ""):
-                            lider_telefono_canc = str(tel_raw).strip()
-                        break
-                except Exception as e:
-                    logger.debug(f"[CANCEL] No se pudo resolver teléfono del líder {lider_email_canc}: {e}")
+            # Resolver teléfono del líder (users → personal_operativo por email → por nombre)
+            lider_nombre_canc_fb = lider_nombre_canc or (actividad_data_cancel.get("lider_actividad") or "")
+            lider_telefono_canc = await _resolver_lider_telefono_async(lider_email_canc, lider_nombre_canc_fb)
             # Incluir también líderes de los grupos requeridos
             grupos_req = actividad_data_cancel.get("grupos_requeridos") or []
             if grupos_req:
@@ -2408,29 +2498,8 @@ async def update_actividad(
                 if not lider_email_act and lider_nombre_act:
                     lider_email_act, lider_nombre_act = await _resolver_lider_actividad_async(actividad_data)
 
-                # Con el email ya resuelto, buscar el teléfono en la colección users
-                if lider_email_act and "@" in lider_email_act:
-                    try:
-                        users_q = db.collection("users").where(
-                            "email", "==", lider_email_act
-                        ).limit(1)
-                        for udoc in await asyncio.to_thread(lambda: list(users_q.stream())):
-                            ud = udoc.to_dict() or {}
-                            tel_raw = ud.get("cellphone") or ud.get("telefono")
-                            if tel_raw not in (None, ""):
-                                lider_telefono_act = str(tel_raw).strip()
-                            if not lider_nombre_act:
-                                lider_nombre_act = (
-                                    ud.get("full_name")
-                                    or ud.get("nombre_completo")
-                                    or ud.get("displayName")
-                                    or ""
-                                )
-                            break
-                    except Exception as e:
-                        logger.debug(
-                            f"[EMAIL] No se pudo resolver teléfono del líder {lider_email_act}: {e}"
-                        )
+                # Resolver teléfono: users.cellphone → personal_operativo por email → por nombre
+                lider_telefono_act = await _resolver_lider_telefono_async(lider_email_act, lider_nombre_act)
 
                 for email_addr in emails_agregados:
                     persona = mapa_nuevos.get(email_addr, {})
@@ -2542,19 +2611,9 @@ async def update_actividad(
                 lider_email_mod, lider_nombre_mod = await _resolver_lider_actividad_async(_updated_snapshot)
                 if lider_email_mod:
                     destinatarios.setdefault(lider_email_mod, lider_nombre_mod or lider_email_mod)
-                # Resolver teléfono del líder para no mostrar el del coordinador en el correo
-                lider_telefono_mod = None
-                if lider_email_mod and "@" in lider_email_mod:
-                    try:
-                        users_q = db.collection("users").where("email", "==", lider_email_mod).limit(1)
-                        for udoc in await asyncio.to_thread(lambda: list(users_q.stream())):
-                            ud = udoc.to_dict() or {}
-                            tel_raw = ud.get("cellphone") or ud.get("telefono")
-                            if tel_raw not in (None, ""):
-                                lider_telefono_mod = str(tel_raw).strip()
-                            break
-                    except Exception as e:
-                        logger.debug(f"[MODIF] No se pudo resolver teléfono del líder {lider_email_mod}: {e}")
+                # Resolver teléfono: users.cellphone → personal_operativo por email → por nombre
+                lider_nombre_mod_fb = lider_nombre_mod or (_updated_snapshot.get("lider_actividad") or "")
+                lider_telefono_mod = await _resolver_lider_telefono_async(lider_email_mod, lider_nombre_mod_fb)
                 logger.info(
                     f"[MODIF] Cambios detectados: {[c['campo'] for c in _cambios_snapshot]}. "
                     f"Enviando a {len(destinatarios)} destinatario(s): {list(destinatarios.keys())}"
