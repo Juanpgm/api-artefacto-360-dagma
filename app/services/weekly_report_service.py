@@ -12,7 +12,7 @@ from typing import Optional
 import pytz
 
 from app.firebase_config import db
-
+from app.utils.text_utils import grupos_match
 logger = logging.getLogger(__name__)
 
 TZ_COL = pytz.timezone("America/Bogota")
@@ -71,7 +71,7 @@ def aggregate_group_report(grupo_nombre: str, start_dt: datetime, end_dt: dateti
             # convocados del grupo
             convocados_grupo = [
                 p for p in personal_asignado
-                if (p.get("grupo") or "").strip().lower() == grupo_nombre.strip().lower()
+                if grupos_match(p.get("grupo"), grupo_nombre)
             ]
             convocados_n = len(convocados_grupo)
             convocados_total += convocados_n
@@ -88,7 +88,7 @@ def aggregate_group_report(grupo_nombre: str, start_dt: datetime, end_dt: dateti
                     for entry in asistencia:
                         if not isinstance(entry, dict):
                             continue
-                        if (entry.get("grupo") or "").strip().lower() != grupo_nombre.strip().lower():
+                        if not grupos_match(entry.get("grupo"), grupo_nombre):
                             continue
                         status = (entry.get("estado") or entry.get("status") or "").lower()
                         if status in ("asistio", "asistió", "presente", "ok"):

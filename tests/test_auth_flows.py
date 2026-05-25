@@ -246,14 +246,15 @@ class TestCompleteGoogleProfile:
              patch("app.routes.auth_routes._get_s3_photo_url", return_value=None):
             resp = client.post(
                 "/auth/complete-google-profile",
-                json={"grupo": "Poda", "full_name": "Nuevo User"},
+                json={"grupo": "Cuadrilla", "full_name": "Nuevo User"},
                 headers={"Authorization": "Bearer valid-token"},
             )
 
         assert resp.status_code == 200
         data = resp.json()
+        # El backend canonicaliza con normalize_grupo (lower + sin acentos + espacios)
         assert data["success"] is True
-        assert data["grupo"] == "Poda"
+        assert data["grupo"] == "cuadrilla"
         db_mock.collection.return_value.document.return_value.update.assert_called_once()
 
     def test_fails_when_grupo_already_set(self):
@@ -271,7 +272,7 @@ class TestCompleteGoogleProfile:
              patch("app.routes.auth_routes._get_s3_photo_url", return_value=None):
             resp = client.post(
                 "/auth/complete-google-profile",
-                json={"grupo": "Poda"},
+                json={"grupo": "Cuadrilla"},
                 headers={"Authorization": "Bearer valid-token"},
             )
 
@@ -304,7 +305,7 @@ class TestCompleteGoogleProfile:
         client = TestClient(app)
         resp = client.post(
             "/auth/complete-google-profile",
-            json={"grupo": "Poda"},
+            json={"grupo": "Cuadrilla"},
         )
         assert resp.status_code in (401, 403, 422)
 

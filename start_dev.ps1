@@ -92,4 +92,10 @@ Write-Host "[4/4] Iniciando API en http://localhost:$BackendPort" -ForegroundCol
 Write-Host "      Docs:  http://localhost:$BackendPort/docs" -ForegroundColor Cyan
 Write-Host ""
 $env:PYTHONUTF8 = "1"
-& $PythonExe -m uvicorn app.main:app --reload --host 0.0.0.0 --port $BackendPort --reload-dir (Join-Path $ProjectRoot "app")
+# Cambiar al directorio del backend para que 'app.main' sea importable por uvicorn
+Push-Location $ProjectRoot
+try {
+    & $PythonExe -m uvicorn app.main:app --reload --host 0.0.0.0 --port $BackendPort --reload-dir (Join-Path $ProjectRoot "app")
+} finally {
+    Pop-Location
+}

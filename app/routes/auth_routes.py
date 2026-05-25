@@ -39,15 +39,19 @@ logger = logging.getLogger(__name__)
 
 def _verify_token_with_fallback(token: str) -> dict:
     """Verifies a Firebase ID token. In local dev, falls back to unsigned JWT decode
-    when Google's certificate endpoint (port 443) is blocked."""
+    when Google's certificate endpoint (port 443) is blocked.
+
+    The fallback only activates when ALLOW_UNVERIFIED_JWT=true is explicitly set in
+    the environment (local .env only — never set this in production or staging).
+    """
     try:
         return auth_client.verify_id_token(token, check_revoked=True)
     except Exception as exc:
         exc_name = type(exc).__name__
         exc_msg = str(exc)
         is_cert_error = "CertificateFetchError" in exc_name or "CertificateFetchError" in exc_msg
-        is_local = os.environ.get("RAILWAY_ENVIRONMENT", "local") != "production"
-        if is_cert_error and is_local:
+        allow_unverified = os.environ.get("ALLOW_UNVERIFIED_JWT", "").lower() == "true"
+        if is_cert_error and allow_unverified:
             try:
                 payload_b64 = token.split(".")[1]
                 payload_b64 += "=" * (4 - len(payload_b64) % 4)

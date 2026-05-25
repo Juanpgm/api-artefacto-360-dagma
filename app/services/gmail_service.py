@@ -311,33 +311,6 @@ def _google_maps_url(actividad_data: dict) -> str:
     return ''
 
 
-def _activity_details_table(actividad_data: dict) -> str:
-    punto = actividad_data.get('punto_encuentro') or {}
-    direccion = punto.get('direccion', 'N/A') if isinstance(punto, dict) else 'N/A'
-    maps_url = _google_maps_url(actividad_data)
-    punto_html = direccion
-    if maps_url:
-        punto_html = f'{direccion} &mdash; <a href="{maps_url}" style="color:#1a73e8;">Ver en Google Maps</a>'
-    rows = [
-        ('Fecha', actividad_data.get('fecha_actividad', 'N/A')),
-        ('Hora de encuentro', actividad_data.get('hora_encuentro', 'N/A')),
-        ('Objetivo', actividad_data.get('objetivo_actividad', 'N/A')),
-        ('Tipo de jornada', actividad_data.get('tipo_jornada', 'N/A')),
-        ('Duración', f"{actividad_data.get('duracion_actividad', 'N/A')} horas"),
-        ('Grupos requeridos', ', '.join(actividad_data.get('grupos_requeridos') or []) or 'N/A'),
-        ('Líder', actividad_data.get('lider_actividad', 'N/A')),
-        ('Teléfono de contacto', actividad_data.get('telefono', 'N/A')),
-        ('Punto de encuentro', punto_html),
-        ('Observaciones', actividad_data.get('observaciones') or 'Ninguna'),
-    ]
-    trs = ''.join(
-        f'<tr><td style="padding:8px 12px;background:#f5f5f5;font-weight:bold;white-space:nowrap;">{label}</td>'
-        f'<td style="padding:8px 12px;">{value}</td></tr>'
-        for label, value in rows
-    )
-    return f'<table style="border-collapse:collapse;width:100%;font-family:Arial,sans-serif;font-size:14px;">{trs}</table>'
-
-
 def _calendar_button(actividad_data: dict) -> str:
     link = actividad_data.get('calendar_event_link', '')
     if not link:

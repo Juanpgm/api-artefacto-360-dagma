@@ -23,15 +23,26 @@ def normalize_grupo(text: str | None) -> str:
     - strip()
     - lower()
     - quita tildes/diacríticos
+    - trata "_" como espacio y colapsa espacios repetidos
+
+    Esto permite que variantes como "Central Social", "Central_Social",
+    "central_social" y "CENTRAL  SOCIAL" se consideren equivalentes, y que
+    "Reacción" coincida con "reaccion". El nombre canónico almacenado en
+    Firestore se preserva (esta función sólo se usa para comparar).
 
     Ejemplos:
-        normalize_grupo("Acústica")   -> "acustica"
-        normalize_grupo("  ACÚSTICA ") -> "acustica"
-        normalize_grupo("Cuadrilla")   -> "cuadrilla"
+        normalize_grupo("Acústica")        -> "acustica"
+        normalize_grupo("  ACÚSTICA ")     -> "acustica"
+        normalize_grupo("Cuadrilla")       -> "cuadrilla"
+        normalize_grupo("Central_Social")  -> "central social"
+        normalize_grupo("Central Social")  -> "central social"
+        normalize_grupo("Reacción")        -> "reaccion"
     """
     if not text:
         return ""
-    return strip_accents(str(text)).strip().lower()
+    cleaned = strip_accents(str(text)).lower().replace("_", " ")
+    # Colapsa cualquier secuencia de whitespace en un único espacio y recorta extremos.
+    return " ".join(cleaned.split())
 
 
 def grupos_match(a: str | None, b: str | None) -> bool:

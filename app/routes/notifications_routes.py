@@ -12,8 +12,9 @@ from typing import Optional, List, Literal
 from fastapi import APIRouter, BackgroundTasks, Depends, Header, HTTPException
 from pydantic import BaseModel, EmailStr, Field
 
+from app.utils.text_utils import grupos_match
 from app.firebase_config import db
-from app.deps.authz import require_min_role, CurrentUser
+from app.deps.authz import require_min_role, require_role, CurrentUser
 from app.models.roles import Role
 from app.services.gmail_service import (
     send_broadcast_email,
@@ -67,10 +68,10 @@ def _resolve_audience(audience: str) -> List[tuple[str, str]]:
                 if email and "@" in email:
                     out.append((email, ud.get("full_name", "")))
     elif audience.startswith("grupo:"):
-        grupo = audience.split(":", 1)[1].strip().lower()
+        grupo = audience.split(":", 1)[1]
         for udoc in db.collection("users").stream():
             ud = udoc.to_dict() or {}
-            if (ud.get("grupo") or "").strip().lower() == grupo:
+            if grupos_match(ud.get("grupo"), grupo):
                 email = (ud.get("email") or "").strip()
                 if email and "@" in email:
                     out.append((email, ud.get("full_name", "")))
@@ -119,11 +120,11 @@ def _do_broadcast(recipients: list[tuple[str, str]], subject: str,
 
 
 @router.post("/admin/notifications/broadcast",
-             dependencies=[Depends(require_min_role(Role.ADMINISTRADOR))])
+             dependencies=[Depends(require_role(Role.DIRECTOR, Role.DESARROLLADOR))])
 async def broadcast_announcement(
     body: BroadcastRequest,
     background_tasks: BackgroundTasks,
-    current_user: CurrentUser = Depends(require_min_role(Role.ADMINISTRADOR)),
+    current_user: CurrentUser = Depends(require_role(Role.DIRECTOR, Role.DESARROLLADOR)),
 ):
     """Envía un anuncio genérico a una audiencia. Procesado en background."""
     recipients = _resolve_audience(body.audience)

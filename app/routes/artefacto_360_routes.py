@@ -212,7 +212,7 @@ def _load_geojson_features(filepath: str) -> dict:
         
         return features_dict
     except Exception as e:
-        print(f"⚠️ Error cargando GeoJSON {filepath}: {str(e)}")
+        logger.warning(f"Error cargando GeoJSON {filepath}: {str(e)}")
         return {}
 
 # Cargar los datos al iniciar
@@ -224,8 +224,8 @@ _BARRIOS_FEATURES = _load_geojson_features(_BARRIOS_FILE)
 _COMUNAS_INDEX = SpatialIndex(_COMUNAS_FEATURES, 'comuna_corregimiento')
 _BARRIOS_INDEX = SpatialIndex(_BARRIOS_FEATURES, 'barrio_vereda')
 
-print(f"✅ Cargadas {len(_COMUNAS_FEATURES)} comunas/corregimientos")
-print(f"✅ Cargados {len(_BARRIOS_FEATURES)} barrios/veredas")
+logger.info("Cargadas %d comunas/corregimientos", len(_COMUNAS_FEATURES))
+logger.info("Cargados %d barrios/veredas", len(_BARRIOS_FEATURES))
 
 
 
@@ -245,7 +245,7 @@ def get_location_from_coordinates(coordinates: List) -> tuple:
         barrio_vereda = _BARRIOS_INDEX.query(coordinates)
         return comuna_corregimiento, barrio_vereda
     except Exception as e:
-        print(f"❌ Error en intersección geográfica (índice): {str(e)}")
+        logger.error(f"Error en intersección geográfica (índice): {str(e)}")
         return None, None
 
 
@@ -346,7 +346,7 @@ async def upload_photos_to_s3(photos: List[UploadFile], grupo: str, reporte_id: 
                 await photo.seek(0)
                 return doc_meta
             except ClientError as e:
-                print(f"❌ Error subiendo foto a S3: {str(e)}")
+                logger.error(f"Error subiendo foto a S3: {str(e)}")
                 raise HTTPException(
                     status_code=500,
                     detail=f"Error subiendo foto '{photo.filename}' a S3: {str(e)}"
@@ -360,7 +360,7 @@ async def upload_photos_to_s3(photos: List[UploadFile], grupo: str, reporte_id: 
                 "size": 0,
                 "upload_date": datetime.now(timezone.utc).isoformat()
             }
-            print(f"⚠️ Modo desarrollo: URL ficticia generada para {photo.filename}")
+            logger.debug(f"Modo desarrollo: URL ficticia generada para {photo.filename}")
             return doc_meta
 
     # Deduplica: el frontend envía la misma foto dos veces cuando hay una sola
@@ -422,7 +422,7 @@ def generar_documentos_con_enlaces(documentos: list, s3_client, bucket_name: str
             enriched["url_presigned"] = url_visualizar
             enriched["url_expiration_seconds"] = EXPIRATION
         except Exception as e:
-            print(f"⚠️ Error generando presigned URL para {s3_key}: {str(e)}")
+            logger.warning(f"Error generando presigned URL para {s3_key}: {str(e)}")
             enriched["url_descarga"] = enriched["s3_url"]
             enriched["url_visualizar"] = enriched["s3_url"]
             enriched["url_presigned"] = enriched["s3_url"]
@@ -459,7 +459,7 @@ def convertir_photosUrl_a_documentos(photos_urls: list, s3_client, bucket_name: 
                 if last_modified:
                     doc_meta["upload_date"] = last_modified.isoformat()
             except Exception as e:
-                print(f"⚠️ No se pudo obtener metadata de S3 para {s3_key}: {str(e)}")
+                logger.warning(f"No se pudo obtener metadata de S3 para {s3_key}: {str(e)}")
         documentos.append(doc_meta)
     return documentos
 
@@ -740,8 +740,8 @@ async def _post_reporte_intervencion(
 
         if coordinates_data and coordinates_type:
             try:
-                print(f"📍 Recibido coordinates_data: {repr(coordinates_data)}")
-                print(f"📍 Tipo: {type(coordinates_data)}, Long: {len(coordinates_data) if coordinates_data else 0}")
+                logger.debug(f"Recibido coordinates_data: {repr(coordinates_data)}")
+                logger.debug(f"Tipo: {type(coordinates_data)}, Long: {len(coordinates_data) if coordinates_data else 0}")
 
                 coordinates_str = coordinates_data.strip()
 
@@ -752,7 +752,7 @@ async def _post_reporte_intervencion(
                             lon = float(parts[0].strip())
                             lat = float(parts[1].strip())
                             coordinates = [lon, lat]
-                            print(f"✅ Coordenadas parseadas como lon,lat: {coordinates}")
+                            logger.debug(f"Coordenadas parseadas como lon,lat: {coordinates}")
                         except ValueError:
                             raise json.JSONDecodeError("Formato inválido", coordinates_str, 0)
                     else:
@@ -771,16 +771,16 @@ async def _post_reporte_intervencion(
                     try:
                         comuna_corregimiento, barrio_vereda = get_location_from_coordinates(coordinates)
                         if comuna_corregimiento:
-                            print(f"✅ Comuna/Corregimiento encontrada: {comuna_corregimiento}")
+                            logger.debug(f"Comuna/Corregimiento encontrada: {comuna_corregimiento}")
                         if barrio_vereda:
-                            print(f"✅ Barrio/Vereda encontrado: {barrio_vereda}")
+                            logger.debug(f"Barrio/Vereda encontrado: {barrio_vereda}")
                     except Exception as e:
-                        print(f"⚠️ Error obteniendo ubicación: {str(e)}")
+                        logger.warning(f"Error obteniendo ubicación: {str(e)}")
                 else:
-                    print(f"ℹ️ La geolocalización solo es disponible para geometría Point, se capturó {coordinates_type}")
+                    logger.debug(f"Geolocalización no aplica para geometría {coordinates_type} (solo Point)")
 
             except json.JSONDecodeError as e:
-                print(f"❌ Error JSON: {str(e)}")
+                logger.warning(f"Error JSON en coordinates_data: {str(e)}")
                 raise HTTPException(
                     status_code=400,
                     detail=f"Formato de coordenadas inválido. Envíe como '[lon,lat]' (ej: '[-76.5225,3.4516]') o 'lon,lat' (ej: '-76.5225,3.4516'). Recibido: '{coordinates_data}'"
@@ -837,9 +837,9 @@ async def _post_reporte_intervencion(
         # Guardar en Firebase (colección unificada)
         try:
             db.collection(COLLECTION_REPORTES_INTERVENCIONES).document(reporte_id).set(reporte_data)
-            print(f"✅ Reporte de intervención grupo {display_name} {reporte_id} guardado en Firebase")
+            logger.info(f"Reporte de intervención grupo {display_name} {reporte_id} guardado en Firebase")
         except Exception as e:
-            print(f"❌ Error guardando en Firebase: {str(e)}")
+            logger.error(f"Error guardando en Firebase: {str(e)}")
             if s3_client:
                 for doc in documentos:
                     try:
@@ -905,7 +905,7 @@ async def _get_reportes_intervenciones(
         try:
             s3_client = get_s3_client()
         except Exception:
-            print("⚠️ No se pudo inicializar S3 client para presigned URLs")
+            logger.warning("No se pudo inicializar S3 client para presigned URLs")
 
         # Si se proporciona un ID específico, buscar directamente por document ID
         if id:
@@ -996,7 +996,7 @@ async def _get_reportes_intervenciones(
         }
 
     except Exception as e:
-        print(f"❌ Error obteniendo reportes de intervención grupo {display_name}: {str(e)}")
+        logger.error(f"Error obteniendo reportes de intervención grupo {display_name}: {str(e)}")
         raise HTTPException(
             status_code=500,
             detail=f"Error obteniendo reportes de intervención del grupo {display_name}: {str(e)}"
@@ -1669,6 +1669,7 @@ async def get_actividades(
 
         # Construir query con filtros opcionales
         query = plan_ref
+        canonical_grupo: Optional[str] = None
 
         if grupo:
             # Filter by grupos_requeridos array.
@@ -1677,26 +1678,22 @@ async def get_actividades(
             # diferentes o en minúscula; resolvemos el nombre canónico contra `grupos`
             # antes de filtrar (Firestore no soporta comparaciones case/accent insensitive).
             grupo_input = grupo.strip()
-            canonical_grupo = grupo_input
-            try:
-                grupos_docs = await asyncio.to_thread(lambda: list(db.collection("grupos").stream()))
-                target_norm = normalize_grupo(grupo_input)
-                for gdoc in grupos_docs:
-                    gdata = gdoc.to_dict() or {}
-                    nombre = (gdata.get("nombre") or "").strip()
-                    if nombre and normalize_grupo(nombre) == target_norm:
-                        canonical_grupo = nombre
-                        break
-            except Exception as e:
-                logger.warning(f"[ACTIVIDADES] No se pudo resolver nombre canónico de grupo '{grupo_input}': {e}")
+            # Normalizar siempre: tras la migración 2026-05-22 todos los valores
+            # en grupos_requeridos son lowercase+sin tildes (normalize_grupo).
+            # El catálogo `grupos` no fue migrado (sigue con mayúsculas display),
+            # por lo que usarlo como canonical provocaba array_contains fallidos.
+            canonical_grupo = normalize_grupo(grupo_input)
 
             query = query.where("grupos_requeridos", "array_contains", canonical_grupo)
 
         # Paginación cursor-based (Firestore no soporta OFFSET)
+        cursor_snap = None
         if start_after:
             cursor_snap = await asyncio.to_thread(plan_ref.document(start_after).get)
             if cursor_snap.exists:
                 query = query.start_after(cursor_snap)
+            else:
+                cursor_snap = None
 
         query = query.limit(limit)
 
@@ -1706,6 +1703,51 @@ async def get_actividades(
             fuera del event loop.
             """
             docs = list(query.stream())
+
+            # Defense-in-depth: si se filtró por grupo y no hubo resultados,
+            # puede haber actividades con grupos_requeridos no canónicos
+            # (datos previos a la migración 2026-05-22 o creados por fuera del
+            # POST normalizado). Hacemos un segundo barrido SIN el where y
+            # filtramos en memoria usando normalize_grupo. Sólo se activa
+            # cuando el fast path falla, así que no impacta la latencia normal.
+            if not docs and canonical_grupo:
+                fallback_query = plan_ref
+                if cursor_snap is not None and getattr(cursor_snap, "exists", False):
+                    fallback_query = fallback_query.start_after(cursor_snap)
+                # Margen amplio para compensar el filtrado en memoria.
+                fallback_query = fallback_query.limit(max(limit * 5, 200))
+                raw_docs = list(fallback_query.stream())
+                matched = []
+                anomalous: set[str] = set()
+                for d in raw_docs:
+                    gr_list = (d.to_dict() or {}).get("grupos_requeridos") or []
+                    if not isinstance(gr_list, list):
+                        continue
+                    hit = False
+                    for g in gr_list:
+                        if not g or not isinstance(g, str):
+                            continue
+                        ng = normalize_grupo(g)
+                        if ng == canonical_grupo:
+                            hit = True
+                        if ng != g:
+                            anomalous.add(g)
+                    if hit:
+                        matched.append(d)
+                        if len(matched) >= limit:
+                            break
+                if anomalous:
+                    logger.warning(
+                        f"[ACTIVIDADES] grupos_requeridos no canónicos detectados "
+                        f"(grupo='{canonical_grupo}'): {sorted(anomalous)}"
+                    )
+                if matched:
+                    logger.info(
+                        f"[ACTIVIDADES] fallback in-memory grupo='{canonical_grupo}' "
+                        f"recuperó {len(matched)} doc(s) tras 0 hits del fast path"
+                    )
+                docs = matched
+
             out = []
             last_id = docs[-1].id if docs else None
 
@@ -1779,7 +1821,7 @@ async def get_actividades(
         }
 
     except Exception as e:
-        print(f"❌ Error obteniendo actividades: {str(e)}")
+        logger.error(f"Error obteniendo actividades: {str(e)}")
         raise HTTPException(
             status_code=500,
             detail=f"Error obteniendo actividades: {str(e)}"
@@ -1886,7 +1928,7 @@ async def convocar_actividad(
             "hora_encuentro": body.hora_encuentro,
             "tipo_jornada": body.tipo_jornada,
             "duracion_actividad": body.duracion_actividad,
-            "grupos_requeridos": body.grupos_requeridos,
+            "grupos_requeridos": [normalize_grupo(g) for g in (body.grupos_requeridos or []) if g],
             "lider_actividad": body.lider_actividad,
             "lider_actividad_email": (body.lider_actividad_email or "").strip(),
             "lider_actividad_telefono": (body.lider_actividad_telefono or "").strip(),
@@ -2449,6 +2491,10 @@ async def update_actividad(
 
         # Datos anteriores (para detectar cambios en personal)
         data_anterior = doc_snapshot.to_dict() or {}
+
+        # Normalizar grupos_requeridos si viene en el cuerpo (consistencia con migración 2026-05-22)
+        if "grupos_requeridos" in body and isinstance(body.get("grupos_requeridos"), list):
+            body["grupos_requeridos"] = [normalize_grupo(g) for g in body["grupos_requeridos"] if g]
 
         # Actualizar en Firestore
         await run_blocking(doc_ref.update, body)
@@ -3015,7 +3061,7 @@ async def get_reportes_intervenciones_todos(
     try:
         s3_client = get_s3_client()
     except Exception:
-        print("⚠️ No se pudo inicializar S3 client para presigned URLs en reportes unificados")
+        logger.warning("No se pudo inicializar S3 client para presigned URLs en reportes unificados")
 
     if s3_client and page_items:
         enriquecer_reportes_con_enlaces(page_items, s3_client, bucket_name)
@@ -3583,7 +3629,7 @@ async def backfill_geo_intervenciones(
         try:
             comuna, barrio = get_location_from_coordinates(raw_coords)
         except Exception as exc:
-            print(f"⚠️ Error geo para doc {doc.id}: {exc}")
+            logger.warning(f"Error geo para doc {doc.id}: {exc}")
             errores += 1
             continue
 
