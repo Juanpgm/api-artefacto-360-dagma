@@ -663,6 +663,7 @@ async def _post_reporte_intervencion(
     observaciones: Optional[str] = None,
     coordinates_type: Optional[str] = None,
     coordinates_data: Optional[str] = None,
+    coordenadas_origen: Optional[str] = None,
     photos: Optional[List[UploadFile]] = None,
     # Campos específicos por grupo (todos opcionales)
     arboles_data: Optional[str] = None,
@@ -821,6 +822,7 @@ async def _post_reporte_intervencion(
             "id_actividad": id_actividad,
             "observaciones": observaciones or "",
             "coordinates": geometry,
+            "coordenadas_origen": (coordenadas_origen or "gps").strip().lower() or "gps",
             "comuna_corregimiento": comuna_corregimiento,
             "barrio_vereda": barrio_vereda,
             "documentos": documentos,
@@ -1149,6 +1151,7 @@ async def post_reporte_intervencion_unificado(
     observaciones: Optional[str] = Form(None, description="Observaciones adicionales"),
     coordinates_type: Optional[str] = Form(None, description="Tipo de geometría (Point, LineString, Polygon, etc.)"),
     coordinates_data: Optional[str] = Form(None, description="Coordenadas en formato JSON array. Ejemplo: [-76.5225, 3.4516]"),
+    coordenadas_origen: Optional[str] = Form(None, description="Origen de las coordenadas: 'gps' o 'manual' (bug #5)"),
     photos: Optional[List[UploadFile]] = File(None, description="Lista de archivos de fotos a subir a S3"),
     arboles_data: Optional[str] = Form(None, description='[Cuadrilla] Lista de árboles JSON. Ej: [{"especie": "Ceiba", "cantidad": 5}]'),
     tipos_plantas: Optional[str] = Form(None, description='[Vivero] Dict JSON de plantas. Ej: {"Guayacán": 10, "Ceiba": 5}'),
@@ -1166,6 +1169,7 @@ async def post_reporte_intervencion_unificado(
         observaciones=observaciones,
         coordinates_type=coordinates_type,
         coordinates_data=coordinates_data,
+        coordenadas_origen=coordenadas_origen,
         photos=photos,
         arboles_data=arboles_data,
         tipos_plantas=tipos_plantas,
@@ -2073,6 +2077,16 @@ async def convocar_actividad(
                 logger.warning(f"[GMAIL] Error en flujo líder-de-actividad: {e}")
 
             # ---- C) Email a los líderes de los GRUPOS REQUERIDOS ----
+            # NOTA (bug #4, 2026-05-28): por defecto SE OMITE este aviso a líderes de grupo.
+            # Solo el líder de la actividad debe recibir notificación al programarse una
+            # actividad; los líderes de grupo pueden consultar la app. Reintroducir
+            # vía opt-in con NOTIFY_GROUP_LEADERS_ON_CREATE=1 si en el futuro se requiere.
+            if not os.getenv("NOTIFY_GROUP_LEADERS_ON_CREATE", "false").strip().lower() in ("1", "true", "yes"):
+                logger.info(
+                    "[NOTIFY] Aviso a líderes de grupos OMITIDO "
+                    "(NOTIFY_GROUP_LEADERS_ON_CREATE no activo)"
+                )
+                return
             try:
                 app_url = os.getenv(
                     "FRONTEND_URL", "https://dagma-360-capture-frontend.vercel.app"
@@ -2531,6 +2545,9 @@ async def update_actividad(
             mapa_nuevos = {(v.get("email") or "").strip().lower(): v for v in personal_nuevo if v.get("email")}
             mapa_anteriores = {(p.get("email") or "").strip().lower(): p for p in personal_anterior if p.get("email")}
 
+            # Bug #3 (2026-05-28): capturar email del actor para suprimir auto-notificaciones.
+            actor_email_lower = (getattr(current_user, "email", "") or "").strip().lower()
+
             async def _enviar_emails():
                 # Resolver datos del LÍDER de la actividad (nombre + teléfono)
                 # para inyectarlos en las plantillas. El campo `telefono` en
@@ -2581,7 +2598,17 @@ async def update_actividad(
                         logger.error(f"[EMAIL] Error enviando desasignacion a {email_addr}: {e}", exc_info=True)
 
                 # CC al líder de la actividad con el resumen del delta (agregados/removidos).
-                if lider_email_act and "@" in lider_email_act and (emails_agregados or emails_eliminados):
+                # Bug #3 (2026-05-28): si el ACTOR que asigna ES el líder, NO autonotificar.
+                actor_is_leader = bool(
+                    actor_email_lower
+                    and lider_email_act
+                    and actor_email_lower == lider_email_act.strip().lower()
+                )
+                if actor_is_leader:
+                    logger.info(
+                        f"[POLICY] Resumen-líder OMITIDO: actor={actor_email_lower} ES el líder de la actividad"
+                    )
+                elif lider_email_act and "@" in lider_email_act and (emails_agregados or emails_eliminados):
                     try:
                         agregados_list = [mapa_nuevos.get(e, {}) for e in emails_agregados]
                         removidos_list = [mapa_anteriores.get(e, {}) for e in emails_eliminados]
