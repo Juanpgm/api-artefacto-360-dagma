@@ -122,11 +122,7 @@ async def global_exception_handler(request, exc):
         }
     )
 
-# ── Health check (sin auth, para ping de conectividad desde la PWA) ──────────
-@app.get("/health", include_in_schema=False)
-async def health_check():
-    """Lightweight health check — no auth required. Used by PWA connectivity detection."""
-    return {"status": "ok", "version": app.version}
+
 
 
 if __name__ == "__main__":

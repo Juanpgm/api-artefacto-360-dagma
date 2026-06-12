@@ -1,4 +1,4 @@
-﻿"""
+"""
 Tests para los endpoints unificados de reportes de intervencion.
 Coleccion unificada: reportes_intervenciones (discriminador: campo "grupo").
 Ejecucion: pytest test_unified_endpoints.py -v
@@ -33,6 +33,7 @@ def mock_firebase_db():
         dr.get.return_value = snap
         mc.stream.return_value = []
         mc.where.return_value = mc
+        mc.limit.return_value = mc
         mock_db.collection.return_value = mc
         yield mock_db
 

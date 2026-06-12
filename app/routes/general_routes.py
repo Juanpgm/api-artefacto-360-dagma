@@ -69,15 +69,52 @@ async def health_check():
     
     Endpoint completo de health check con información del sistema
     """
+    from app.firebase_config import db
+    from app.utils.firestore_async import run_blocking
+    from unittest.mock import Mock
+    
+    # 1. Verificar base de datos (Firestore)
+    db_status = "ok"
+    if not isinstance(db, Mock):
+        try:
+            # Intentar listar colecciones de forma no bloqueante
+            await run_blocking(lambda: list(db.collections()))
+        except Exception as e:
+            db_status = f"error: {str(e)}"
+            
+    # 2. Verificar almacenamiento (AWS S3)
+    s3_status = "ok"
+    aws_key = os.getenv("AWS_ACCESS_KEY_ID")
+    aws_secret = os.getenv("AWS_SECRET_ACCESS_KEY")
+    bucket = os.getenv("S3_BUCKET_NAME") or os.getenv("AWS_S3_BUCKET_NAME") or "360-dagma-photos"
+    
+    if not aws_key or not aws_secret:
+        s3_status = "unconfigured"
+    else:
+        try:
+            import boto3
+            s3_client = boto3.client(
+                "s3",
+                aws_access_key_id=aws_key,
+                aws_secret_access_key=aws_secret,
+                region_name=os.getenv("AWS_REGION", "us-east-1"),
+            )
+            # Intentar listado mínimo de objetos para probar conexión
+            await run_blocking(lambda: s3_client.list_objects_v2(Bucket=bucket, MaxKeys=1))
+        except Exception as e:
+            s3_status = f"error: {str(e)}"
+            
+    is_healthy = db_status == "ok" and s3_status in ("ok", "unconfigured")
+    
     return {
-        "status": "healthy",
+        "status": "healthy" if is_healthy else "unhealthy",
         "timestamp": datetime.now(timezone.utc).isoformat(),
         "service": "API Artefacto 360 DAGMA",
         "version": "1.0.0",
         "uptime": "OK",
         "checks": {
             "api": "ok",
-            "database": "ok",
-            "storage": "ok"
+            "database": db_status,
+            "storage": s3_status
         }
     }

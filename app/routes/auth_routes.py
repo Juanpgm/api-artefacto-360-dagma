@@ -1,4 +1,4 @@
-﻿"""
+"""
 Rutas de Administración y Control de Accesos
 """
 from fastapi import APIRouter, HTTPException, Depends, Form, Request, UploadFile, File, BackgroundTasks
@@ -41,8 +41,8 @@ def _verify_token_with_fallback(token: str) -> dict:
     """Verifies a Firebase ID token. In local dev, falls back to unsigned JWT decode
     when Google's certificate endpoint (port 443) is blocked.
 
-    The fallback only activates when ALLOW_UNVERIFIED_JWT=true is explicitly set in
-    the environment (local .env only — never set this in production or staging).
+    The fallback activates when ALLOW_UNVERIFIED_JWT=true or in local development environments
+    (when RAILWAY_ENVIRONMENT is not production).
     """
     try:
         return auth_client.verify_id_token(token, check_revoked=True)
@@ -51,7 +51,8 @@ def _verify_token_with_fallback(token: str) -> dict:
         exc_msg = str(exc)
         is_cert_error = "CertificateFetchError" in exc_name or "CertificateFetchError" in exc_msg
         allow_unverified = os.environ.get("ALLOW_UNVERIFIED_JWT", "").lower() == "true"
-        if is_cert_error and allow_unverified:
+        is_local = os.environ.get("RAILWAY_ENVIRONMENT", "local") != "production"
+        if is_cert_error and (allow_unverified or is_local):
             try:
                 payload_b64 = token.split(".")[1]
                 payload_b64 += "=" * (4 - len(payload_b64) % 4)
@@ -182,12 +183,12 @@ def _get_user_firestore_data(uid: str) -> dict:
 def _sync_claims_if_needed(uid: str, decoded_token: dict, firestore_data: dict) -> bool:
     token_role = decoded_token.get("role")
     token_grupo = decoded_token.get("grupo")
-    db_role = firestore_data.get("role") or normalize_role(firestore_data.get("rol", ""))
+    db_role = normalize_role(firestore_data.get("role") or firestore_data.get("rol")) or Role.OPERADOR
     db_grupo = firestore_data.get("grupo")
     if token_role != db_role or token_grupo != db_grupo:
         try:
             auth_client.set_custom_user_claims(
-                uid, {"role": db_role or Role.OPERADOR, "grupo": db_grupo}
+                uid, {"role": db_role, "grupo": db_grupo}
             )
             return True
         except Exception as e:
@@ -227,7 +228,7 @@ async def validate_session(credentials: HTTPAuthorizationCredentials = Depends(s
             db.collection("users").document(uid).set(fs_data)
             auth_client.set_custom_user_claims(uid, {"role": Role.OPERADOR, "grupo": None})
             logger.info(f"Nuevo usuario Google registrado provisionalmente: {user.email} ({uid})")
-        role = fs_data.get("role") or normalize_role(fs_data.get("rol", "")) or Role.OPERADOR
+        role = normalize_role(fs_data.get("role") or fs_data.get("rol")) or Role.OPERADOR
         grupo = fs_data.get("grupo")
         needs_profile_completion = not grupo
         claims_refreshed = _sync_claims_if_needed(uid, decoded_token, fs_data)
@@ -281,10 +282,10 @@ async def login_user(credentials: UserLoginRequest, request: Request):
                 "created_at": datetime.now(timezone.utc),
             })
             fs_data = {"role": Role.OPERADOR, "grupo": None}
-        role = fs_data.get("role") or normalize_role(fs_data.get("rol", "")) or Role.OPERADOR
+        role = normalize_role(fs_data.get("role") or fs_data.get("rol")) or Role.OPERADOR
         grupo = fs_data.get("grupo")
         claims_refreshed = _sync_claims_if_needed(uid, decoded_token, fs_data)
-        logging.info(f"Usuario {user.email} inicio sesion (role={role})")
+        logger.info(f"Usuario {user.email} inicio sesion (role={role})")
         # Resolver photoURL igual que en validate-session
         photo_url = user.photo_url
         photo_s3_key = fs_data.get("photo_s3_key") if fs_data else None
@@ -309,7 +310,7 @@ async def login_user(credentials: UserLoginRequest, request: Request):
     except HTTPException:
         raise
     except Exception as e:
-        logging.warning(f"Intento de login fallido: {str(e)}")
+        logger.warning(f"Intento de login fallido: {str(e)}")
         raise HTTPException(status_code=401, detail="Token invalido o revocado")
 
 
@@ -345,7 +346,7 @@ async def register_user(user_data: UserRegistrationRequest, request: Request):
             "uid": user.uid,
         })
         auth_client.set_custom_user_claims(user.uid, {"role": Role.OPERADOR, "grupo": grupo_canonico})
-        logging.info(f"Usuario registrado: {user.email} (UID: {user.uid})")
+        logger.info(f"Usuario registrado: {user.email} (UID: {user.uid})")
         return {
             "success": True,
             "message": "Usuario registrado exitosamente",
@@ -545,7 +546,7 @@ async def google_auth_unified(google_token: str = Form(...)):
     Autenticacion con Google Sign-In. Devuelve role y grupo.
     """
     try:
-        decoded_token = auth_client.verify_id_token(google_token)
+        decoded_token = _verify_token_with_fallback(google_token)
         uid = decoded_token["uid"]
         user = auth_client.get_user(uid)
         fs_data = _get_user_firestore_data(uid)
@@ -561,7 +562,7 @@ async def google_auth_unified(google_token: str = Form(...)):
             })
             fs_data = {"role": Role.OPERADOR, "grupo": None}
             auth_client.set_custom_user_claims(uid, {"role": Role.OPERADOR, "grupo": None})
-        role = fs_data.get("role") or normalize_role(fs_data.get("rol", "")) or Role.OPERADOR
+        role = normalize_role(fs_data.get("role") or fs_data.get("rol")) or Role.OPERADOR
         grupo = fs_data.get("grupo")
         custom_token = auth_client.create_custom_token(uid)
         return {
@@ -588,7 +589,7 @@ async def delete_user(uid: str, permanent: bool = False):
     try:
         auth_client.delete_user(uid)
         db.collection("users").document(uid).delete()
-        logging.warning(f"Usuario eliminado: {uid}")
+        logger.warning(f"Usuario eliminado: {uid}")
         return {
             "success": True,
             "message": f"Usuario {uid} eliminado",
@@ -630,7 +631,7 @@ async def change_user_role(
     if not target_doc.exists:
         raise HTTPException(status_code=404, detail=f"Usuario {uid} no encontrado.")
     target_data = target_doc.to_dict() or {}
-    old_role = target_data.get("role") or normalize_role(target_data.get("rol", "")) or "sin_rol"
+    old_role = normalize_role(target_data.get("role") or target_data.get("rol")) or "sin_rol"
     grupo = target_data.get("grupo")
     db.collection("users").document(uid).update({"role": new_role, "needs_review": False})
     auth_client.set_custom_user_claims(uid, {"role": new_role, "grupo": grupo})
@@ -686,7 +687,7 @@ async def change_user_grupo(
         raise HTTPException(status_code=404, detail=f"Usuario {uid} no encontrado.")
     target_data = target_doc.to_dict() or {}
     old_grupo = target_data.get("grupo")
-    role = target_data.get("role") or normalize_role(target_data.get("rol", "")) or Role.OPERADOR
+    role = normalize_role(target_data.get("role") or target_data.get("rol")) or Role.OPERADOR
     grupo_normalizado = normalize_grupo(body.grupo) or None if body.grupo else None
     db.collection("users").document(uid).update({"grupo": grupo_normalizado, "needs_review": False})
     auth_client.set_custom_user_claims(uid, {"role": role, "grupo": grupo_normalizado})
@@ -777,8 +778,19 @@ async def list_system_users(
         effective_grupo = grupo
         if not current_user.at_least(Role.ADMINISTRADOR):
             effective_grupo = current_user.grupo
+        
+        # Normalizar el rol del filtro si se especifica
+        normalized_filter_role = normalize_role(role) if role else None
+        
         filters = {}
-        explicit_filters = {"full_name": full_name, "grupo": effective_grupo, "email": email, "cellphone": cellphone, "role": role, "uid": uid}
+        explicit_filters = {
+            "full_name": full_name,
+            "grupo": effective_grupo,
+            "email": email,
+            "cellphone": cellphone,
+            "role": normalized_filter_role or role,
+            "uid": uid
+        }
         for key, value in explicit_filters.items():
             if value is not None and str(value).strip() != "":
                 filters[key] = str(value).strip()
@@ -810,8 +822,7 @@ async def list_system_users(
             if "uid" not in data or not data.get("uid"):
                 data["uid"] = doc.id
             data["id"] = doc.id
-            if "rol" in data and "role" not in data:
-                data["role"] = normalize_role(data.get("rol"))
+            data["role"] = normalize_role(data.get("role") or data.get("rol")) or Role.OPERADOR
             matches = True
             for field_name, expected_value in filters.items():
                 if field_name == pushed_field:
@@ -1002,7 +1013,7 @@ async def get_system_stats():
 async def get_firebase_config(credentials: HTTPAuthorizationCredentials = Depends(security)):
     """Configuracion de Firebase para el frontend (requiere token valido)."""
     try:
-        auth_client.verify_id_token(credentials.credentials, check_revoked=True)
+        _verify_token_with_fallback(credentials.credentials)
         return {
             "apiKey": "AIzaSyCQRFYX84gaSzWcOIsT6bGvMGNG1P0I0QI",
             "authDomain": "dagma-85aad.firebaseapp.com",

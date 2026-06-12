@@ -92,7 +92,6 @@ def mock_firebase(monkeypatch):
     Cada test puede override `current_test_user` para cambiar el usuario.
     """
     with (
-        patch("app.firebase_config.auth") as mock_auth,
         patch("app.firebase_config.db") as mock_db,
         patch("app.firebase_config.auth_client") as mock_auth_client,
         patch("app.deps.authz.auth_client") as mock_authz_auth,
