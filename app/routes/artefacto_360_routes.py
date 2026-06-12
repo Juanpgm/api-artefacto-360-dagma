@@ -1007,6 +1007,122 @@ async def _get_reportes_intervenciones(
 
 # ==================== RUTAS UNIFICADAS: /grupos/{grupo}/... ====================#
 
+
+class UpdateCoordenadasRequest(BaseModel):
+    coordinates_data: str = Field(..., description="Coordenadas JSON array. Point: [-76.5225, 3.4516]")
+    coordinates_type: Optional[str] = Field("Point", description="Tipo de geometría GeoJSON")
+
+
+@router.patch(
+    "/grupos/{grupo_key}/reporte_intervencion/{reporte_id}/coordenadas",
+    summary="🟡 PATCH | Actualizar Coordenadas de Reporte",
+    description="""
+## 🟡 PATCH | Actualizar Coordenadas de Reporte
+
+**Propósito**: Actualiza las coordenadas geoespaciales de un reporte de intervención ya guardado.
+Recalcula automáticamente `comuna_corregimiento` y `barrio_vereda` con las nuevas coords.
+
+### 📥 Body
+```json
+{
+  "coordinates_data": "[-76.5225, 3.4516]",
+  "coordinates_type": "Point"
+}
+```
+
+### ✅ Respuesta
+```json
+{
+  "success": true,
+  "id": "REP-2026-001",
+  "message": "Coordenadas actualizadas",
+  "coordinates": { "type": "Point", "coordinates": [-76.5225, 3.4516] }
+}
+```
+    """,
+    tags=["Artefacto de Captura DAGMA"],
+)
+async def patch_coordenadas_reporte(
+    grupo_key: str,
+    reporte_id: str,
+    body: UpdateCoordenadasRequest,
+    current_user: CurrentUser = Depends(require_min_role(Role.OPERADOR)),
+):
+    """
+    Actualiza las coordenadas de un reporte existente.
+    Solo el autor del reporte, su lider de grupo o un administrador puede editar.
+    """
+    try:
+        config = get_grupo_config(grupo_key)
+        tz_col = pytz.timezone("America/Bogota")
+
+        # Validar y parsear coordenadas
+        try:
+            coords_list = json.loads(body.coordinates_data)
+        except (json.JSONDecodeError, ValueError):
+            raise HTTPException(status_code=422, detail="coordinates_data debe ser un JSON array válido")
+
+        coordinates_type = (body.coordinates_type or "Point").strip()
+        if not validate_coordinates(coords_list, coordinates_type):
+            raise HTTPException(status_code=422, detail="Coordenadas inválidas para el tipo de geometría indicado")
+
+        # Obtener documento
+        doc_ref = db.collection(COLLECTION_REPORTES_INTERVENCIONES).document(reporte_id.strip())
+        doc = await asyncio.to_thread(doc_ref.get)
+        if not doc.exists:
+            raise HTTPException(status_code=404, detail=f"Reporte '{reporte_id}' no encontrado")
+
+        data = doc.to_dict() or {}
+
+        # Verificar grupo
+        if data.get("grupo") != grupo_key:
+            raise HTTPException(status_code=403, detail="El reporte no pertenece al grupo indicado")
+
+        # Verificar autoría: operador solo puede editar sus propios reportes
+        if not current_user.at_least(Role.LIDER):
+            registrado_por = data.get("registrado_por", "")
+            if registrado_por not in (current_user.email, current_user.nombre_completo, current_user.displayName):
+                raise HTTPException(status_code=403, detail="Solo puedes editar tus propios reportes")
+
+        # Construir geometría GeoJSON
+        geometry = {"type": coordinates_type, "coordinates": coords_list}
+
+        # Recalcular ubicación administrativa
+        comuna_corregimiento, barrio_vereda = get_location_from_coordinates(coords_list)
+
+        update_fields: dict = {
+            "coordinates": geometry,
+            "coordenadas_origen": "manual",
+            "coordenadas_editadas": True,
+            "ultima_edicion_coords": datetime.now(tz_col).isoformat(),
+        }
+        if comuna_corregimiento:
+            update_fields["comuna_corregimiento"] = comuna_corregimiento
+        if barrio_vereda:
+            update_fields["barrio_vereda"] = barrio_vereda
+
+        await asyncio.to_thread(doc_ref.update, update_fields)
+
+        logger.info(
+            f"[COORDS] Reporte {reporte_id} coords actualizadas por {current_user.email}: {coords_list}"
+        )
+
+        return {
+            "success": True,
+            "id": reporte_id,
+            "message": "Coordenadas actualizadas",
+            "coordinates": geometry,
+            "comuna_corregimiento": comuna_corregimiento,
+            "barrio_vereda": barrio_vereda,
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error actualizando coordenadas reporte {reporte_id}: {e}")
+        raise HTTPException(status_code=500, detail=f"Error actualizando coordenadas: {str(e)}")
+
+
 @router.post(
     "/grupos/{grupo_key}/reporte_intervencion",
     summary="🟢 POST | Registrar Reporte de Intervención (Unificado)",
