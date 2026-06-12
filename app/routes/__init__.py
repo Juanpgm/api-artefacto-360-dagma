@@ -8,5 +8,6 @@ from . import (
     firebase_routes,
     artefacto_360_routes,
     auth_routes,
-    seguimiento_routes
+    seguimiento_routes,
+    notifications_routes,
 )

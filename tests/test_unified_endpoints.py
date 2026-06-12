@@ -237,9 +237,9 @@ class TestUnifiedPostEndpoint:
         saved = mock_firebase_db.collection.return_value.document.return_value.set.call_args[0][0]
         assert saved["grupo"] == "cuadrilla"
 
-    def test_post_sin_auth_retorna_401(self):
+    def test_post_sin_auth_retorna_403(self):
         r = client.post("/grupos/cuadrilla/reporte_intervencion", data={"tipo_intervencion": "T"})
-        assert r.status_code == 401
+        assert r.status_code == 403  # HTTPBearer returns 403 when Authorization header is missing
 
 
 class TestUnifiedGetEndpoint:
@@ -296,9 +296,9 @@ class TestUnifiedGetEndpoint:
             assert r.status_code == 200, f"{grupo}: {r.text}"
             mock_firebase_db.collection.assert_called_with("reportes_intervenciones")
 
-    def test_get_sin_auth_retorna_401(self):
+    def test_get_sin_auth_retorna_403(self):
         r = client.get("/grupos/cuadrilla/reportes_intervenciones")
-        assert r.status_code == 401
+        assert r.status_code == 403  # HTTPBearer returns 403 when Authorization header is missing
 
 
 class TestLegacyRoutes:

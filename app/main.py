@@ -6,22 +6,25 @@ import logging
 import os
 import time
 from fastapi import FastAPI, Request
+from starlette.middleware.base import BaseHTTPMiddleware
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.gzip import GZipMiddleware
 from fastapi.responses import JSONResponse
-from slowapi import Limiter, _rate_limit_exceeded_handler
-from slowapi.util import get_remote_address
+from slowapi import _rate_limit_exceeded_handler
 from slowapi.errors import RateLimitExceeded
 from slowapi.middleware import SlowAPIMiddleware
+from app.limiter import limiter
 
 # Configurar logging de auditoría
+import sys
+_log_stream = open(sys.stdout.fileno(), mode='w', encoding='utf-8', buffering=1, closefd=False)
 _LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO").upper()
 logging.basicConfig(
     level=getattr(logging, _LOG_LEVEL, logging.INFO),
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     handlers=[
-        logging.FileHandler('audit.log'),
-        logging.StreamHandler()
+        logging.FileHandler('audit.log', encoding='utf-8'),
+        logging.StreamHandler(stream=_log_stream),
     ]
 )
 logger = logging.getLogger(__name__)
@@ -52,34 +55,40 @@ app = FastAPI(
     redoc_url="/redoc"
 )
 
-# Configurar rate limiting
-limiter = Limiter(key_func=get_remote_address)
+# Wire the shared limiter into the app state so SlowAPIMiddleware can find it
+# and @limiter.limit() decorators in routers work correctly.
 app.state.limiter = limiter
 app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 
-# Agregar middleware de rate limiting
-app.add_middleware(SlowAPIMiddleware)
+# ---------------------------------------------------------------------------
+# Middleware stack — Starlette processes add_middleware in LIFO order,
+# so register from innermost to outermost:
+#   1. Timing (innermost — closest to the handler)
+#   2. SlowAPI rate limiting
+#   3. GZip compression
+#   4. CORS (outermost — must wrap everything, including error responses)
+# ---------------------------------------------------------------------------
 
-# GZip: comprime respuestas JSON >= 1KB (~70% menos payload)
-app.add_middleware(GZipMiddleware, minimum_size=1000)
+class _TimingMiddleware(BaseHTTPMiddleware):
+    """Adds X-Process-Time response header and logs slow requests."""
+
+    async def dispatch(self, request: Request, call_next):
+        start = time.perf_counter()
+        response = await call_next(request)
+        elapsed_ms = (time.perf_counter() - start) * 1000.0
+        response.headers["X-Process-Time"] = f"{elapsed_ms:.1f}"
+        if elapsed_ms >= _SLOW_REQUEST_MS:
+            _perf_logger.warning(
+                "slow_request method=%s path=%s status=%s elapsed_ms=%.1f",
+                request.method, request.url.path, response.status_code, elapsed_ms,
+            )
+        return response
 
 
-# Middleware de tiempos: agrega header X-Process-Time y loguea lentos
-@app.middleware("http")
-async def _timing_middleware(request: Request, call_next):
-    start = time.perf_counter()
-    response = await call_next(request)
-    elapsed_ms = (time.perf_counter() - start) * 1000.0
-    response.headers["X-Process-Time"] = f"{elapsed_ms:.1f}"
-    if elapsed_ms >= _SLOW_REQUEST_MS:
-        _perf_logger.warning(
-            "slow_request method=%s path=%s status=%s elapsed_ms=%.1f",
-            request.method, request.url.path, response.status_code, elapsed_ms,
-        )
-    return response
-
-# Configurar CORS
-app.add_middleware(
+app.add_middleware(_TimingMiddleware)           # innermost
+app.add_middleware(SlowAPIMiddleware)           # rate limiting
+app.add_middleware(GZipMiddleware, minimum_size=1000)  # compression
+app.add_middleware(                             # outermost — CORS must be last
     CORSMiddleware,
     allow_origins=[
         # Desarrollo local
@@ -90,9 +99,9 @@ app.add_middleware(
         "http://localhost:5175",      # Vite alternate
         # Producción
         "https://web-production-2d737.up.railway.app",  # Railway API
-        "https://artefacto-calitrack-360-frontend-pr.vercel.app",  # Frontend Vercel (production)
+        "https://artefacto-calitrack-360-frontend-pr.vercel.app",  # Frontend Vercel
         "https://dagma-360-capture-frontend.vercel.app",  # Frontend Vercel (legacy)
-        "https://tu-dominio-produccion.com"  # Dominio custom adicional
+        "https://tu-dominio-produccion.com",   # Dominio custom adicional
     ],
     allow_credentials=True,
     allow_methods=["*"],

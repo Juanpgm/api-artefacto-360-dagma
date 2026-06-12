@@ -8,8 +8,9 @@ from firebase_admin import credentials, firestore, auth
 from dotenv import load_dotenv
 import logging
 
-# Configurar logging
-logging.basicConfig(level=logging.INFO)
+# Logging is configured centrally in main.py (FileHandler + StreamHandler).
+# Calling basicConfig() here would override that setup if this module is
+# imported before main.py (e.g. in tests or scripts).
 logger = logging.getLogger(__name__)
 
 # Cargar variables de entorno desde back/.env, independientemente del directorio de trabajo

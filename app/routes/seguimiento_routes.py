@@ -7,7 +7,7 @@ from typing import List, Optional, Dict, Any
 from datetime import datetime, timezone, timedelta
 from pydantic import BaseModel, Field, field_validator
 import uuid
-from firebase_admin import firestore
+from firebase_admin import firestore as _firestore_module
 from app.utils.firestore_async import run_blocking, stream_to_list
 
 # Importar configuración de Firebase
@@ -146,7 +146,7 @@ async def obtener_reporte_completo(reporte_id: str) -> Dict[str, Any]:
     # Obtener historial de avances
     historial_ref = db.collection('historial_avance_reportes') \
         .where('reporte_id', '==', reporte_id) \
-        .order_by('fecha', direction=firestore.Query.DESCENDING)
+        .order_by('fecha', direction="DESCENDING")
     
     historial_docs = await stream_to_list(historial_ref)
     historial = []
@@ -656,7 +656,7 @@ async def get_historial_reporte(
         # Obtener historial
         historial_ref = db.collection('historial_avance_reportes') \
             .where('reporte_id', '==', reporteId) \
-            .order_by('fecha', direction=firestore.Query.DESCENDING)
+            .order_by('fecha', direction="DESCENDING")
         
         historial_docs = await stream_to_list(historial_ref)
         historial = []

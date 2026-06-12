@@ -71,13 +71,14 @@ async def health_check():
     """
     from app.firebase_config import db
     from app.utils.firestore_async import run_blocking
-    from unittest.mock import Mock
     
     # 1. Verificar base de datos (Firestore)
     db_status = "ok"
-    if not isinstance(db, Mock):
+    # Duck-type check: real Firestore clients have a `project` attribute.
+    # Mock/stub objects used in tests won't have it, so we skip the live check.
+    is_real_db = hasattr(db, "project") and not getattr(db, "_mock_name", None)
+    if is_real_db:
         try:
-            # Intentar listar colecciones de forma no bloqueante
             await run_blocking(lambda: list(db.collections()))
         except Exception as e:
             db_status = f"error: {str(e)}"

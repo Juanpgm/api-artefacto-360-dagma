@@ -21,14 +21,13 @@ from app.services.gmail_service import (
     send_role_change_email,
     send_grupo_change_email,
 )
-from slowapi import Limiter
-from slowapi.util import get_remote_address
+from app.limiter import limiter
 
 router = APIRouter(tags=["Administración y Control de Accesos"])
 security = HTTPBearer()
 
-# Configurar rate limiter
-limiter = Limiter(key_func=get_remote_address)
+# Rate limiter — uses the shared instance registered in app.state,
+# so SlowAPIMiddleware enforces these limits correctly at runtime.
 
 logger = logging.getLogger(__name__)
 
@@ -508,7 +507,7 @@ async def upload_profile_photo(
             io.BytesIO(content),
             bucket,
             s3_key,
-            {"ContentType": photo.content_type},
+            ExtraArgs={"ContentType": photo.content_type},
         )
     except HTTPException:
         raise
@@ -688,7 +687,7 @@ async def change_user_grupo(
     target_data = target_doc.to_dict() or {}
     old_grupo = target_data.get("grupo")
     role = normalize_role(target_data.get("role") or target_data.get("rol")) or Role.OPERADOR
-    grupo_normalizado = normalize_grupo(body.grupo) or None if body.grupo else None
+    grupo_normalizado = normalize_grupo(body.grupo) if body.grupo else None
     db.collection("users").document(uid).update({"grupo": grupo_normalizado, "needs_review": False})
     auth_client.set_custom_user_claims(uid, {"role": role, "grupo": grupo_normalizado})
     auth_client.revoke_refresh_tokens(uid)
@@ -991,9 +990,10 @@ async def get_role_details(role_id: str):
 async def get_audit_logs(limit: int = 100, user_uid: Optional[str] = None, action: Optional[str] = None):
     """Logs de cambios de rol."""
     try:
-        query = db.collection("audit_role_changes").order_by("timestamp", direction="DESCENDING").limit(limit)
+        query = db.collection("audit_role_changes")
         if user_uid:
             query = query.where("target_uid", "==", user_uid)
+        query = query.order_by("timestamp", direction="DESCENDING").limit(limit)
         docs = await stream_to_list(query)
         logs = [{**(doc.to_dict() or {}), "id": doc.id} for doc in docs]
         return {"logs": logs, "total": len(logs)}
