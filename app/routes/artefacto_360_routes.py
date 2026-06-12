@@ -985,6 +985,8 @@ async def _get_reportes_intervenciones(
 
         if s3_client:
             enriquecer_reportes_con_enlaces(reportes, s3_client, bucket_name)
+        # Enriquecer con datos de actividad asociada
+        await _enriquecer_con_actividad(reportes)
         return {
             "success": True,
             "total": len(reportes),
@@ -1003,6 +1005,57 @@ async def _get_reportes_intervenciones(
             status_code=500,
             detail=f"Error obteniendo reportes de intervención del grupo {display_name}: {str(e)}"
         )
+
+
+# ==================== ENRICH: datos de actividad asociada ====================#
+
+
+async def _enriquecer_con_actividad(reportes: list) -> None:
+    """
+    Para cada reporte que tenga id_actividad, consulta Firestore y agrega
+    los campos actividad_* directamente en el dict del reporte (in-place).
+    Usa asyncio.gather para hacer todas las consultas en paralelo.
+    """
+    # Recolectar IDs únicos de actividad presentes en el lote
+    actividad_ids = list({r.get("id_actividad") for r in reportes if r.get("id_actividad")})
+    if not actividad_ids:
+        return
+
+    async def _fetch_one(act_id: str) -> tuple:
+        try:
+            doc = await asyncio.to_thread(
+                db.collection("plan_distrito_verde").document(act_id).get
+            )
+            if doc.exists:
+                return act_id, doc.to_dict() or {}
+            # fallback: buscar en colección alternativa 'actividades'
+            doc2 = await asyncio.to_thread(
+                db.collection("actividades").document(act_id).get
+            )
+            if doc2.exists:
+                return act_id, doc2.to_dict() or {}
+            return act_id, {}
+        except Exception as e:
+            logger.debug(f"[ENRICH] Error fetching actividad {act_id}: {e}")
+            return act_id, {}
+
+    results = await asyncio.gather(*[_fetch_one(aid) for aid in actividad_ids])
+    actividades_map: dict[str, dict] = dict(results)
+
+    for reporte in reportes:
+        aid = reporte.get("id_actividad")
+        if not aid or aid not in actividades_map:
+            continue
+        act = actividades_map[aid]
+        if not act:
+            continue
+        # Inyectar campos de actividad como prefijo actividad_*
+        reporte["actividad_codigo"] = aid
+        reporte["actividad_tipo_jornada"] = act.get("tipo_jornada")
+        reporte["actividad_lider"] = act.get("lider_actividad")
+        reporte["actividad_estado"] = act.get("estado_actividad")
+        reporte["actividad_objetivo"] = act.get("objetivo_actividad")
+        reporte["actividad_fecha"] = act.get("fecha_actividad")
 
 
 # ==================== RUTAS UNIFICADAS: /grupos/{grupo}/... ====================#
@@ -1121,6 +1174,119 @@ async def patch_coordenadas_reporte(
     except Exception as e:
         logger.error(f"Error actualizando coordenadas reporte {reporte_id}: {e}")
         raise HTTPException(status_code=500, detail=f"Error actualizando coordenadas: {str(e)}")
+
+
+# ── Modelo para PATCH campos de texto ──
+class UpdateCamposReporteRequest(BaseModel):
+    tipo_intervencion: Optional[str] = Field(None, max_length=200, description="Nuevo tipo de intervención")
+    descripcion_intervencion: Optional[str] = Field(None, max_length=3000, description="Nueva descripción")
+    observaciones: Optional[str] = Field(None, max_length=2000, description="Nuevas observaciones")
+    direccion: Optional[str] = Field(None, max_length=500, description="Nueva dirección")
+
+
+@router.patch(
+    "/grupos/{grupo_key}/reporte_intervencion/{reporte_id}",
+    summary="🟡 PATCH | Editar Campos de Reporte",
+    description="""
+## 🟡 PATCH | Editar Campos de Reporte
+
+Actualiza campos de texto editables de un reporte de intervención ya guardado.
+Solo actualiza los campos enviados (patch parcial).
+
+### Campos editables
+- `tipo_intervencion`: Tipo de intervención
+- `descripcion_intervencion`: Descripción detallada
+- `observaciones`: Observaciones adicionales
+- `direccion`: Dirección física
+
+### 📥 Body
+```json
+{
+  "tipo_intervencion": "Poda correctiva",
+  "descripcion_intervencion": "Descripción actualizada...",
+  "observaciones": "Sin novedad",
+  "direccion": "Calle 5 # 10-20"
+}
+```
+    """,
+    tags=["Artefacto de Captura DAGMA"],
+)
+async def patch_campos_reporte(
+    grupo_key: str,
+    reporte_id: str,
+    body: UpdateCamposReporteRequest,
+    current_user: CurrentUser = Depends(require_min_role(Role.OPERADOR)),
+):
+    """
+    Actualiza campos de texto editables de un reporte.
+    El autor del reporte, su líder de grupo o un administrador puede editar.
+    """
+    try:
+        get_grupo_config(grupo_key)
+        tz_col = pytz.timezone("America/Bogota")
+
+        doc_ref = db.collection(COLLECTION_REPORTES_INTERVENCIONES).document(reporte_id.strip())
+        doc = await asyncio.to_thread(doc_ref.get)
+        if not doc.exists:
+            raise HTTPException(status_code=404, detail=f"Reporte '{reporte_id}' no encontrado")
+
+        data = doc.to_dict() or {}
+
+        # Verificar grupo
+        if data.get("grupo") != grupo_key:
+            raise HTTPException(status_code=403, detail="El reporte no pertenece al grupo indicado")
+
+        # Verificar autoría: operador solo puede editar sus propios reportes
+        if not current_user.at_least(Role.LIDER):
+            registrado_por = data.get("registrado_por", "")
+            user_identifiers = {
+                getattr(current_user, "email", None),
+                getattr(current_user, "full_name", None),
+                getattr(current_user, "uid", None),
+            } - {None}
+            if registrado_por not in user_identifiers:
+                raise HTTPException(status_code=403, detail="Solo puedes editar tus propios reportes")
+
+        # Construir dict de campos a actualizar (solo los enviados y no None)
+        update_fields: dict = {
+            "ultima_edicion_campos": datetime.now(tz_col).isoformat(),
+            "editado": True,
+        }
+        if body.tipo_intervencion is not None:
+            update_fields["tipo_intervencion"] = body.tipo_intervencion.strip()
+        if body.descripcion_intervencion is not None:
+            update_fields["descripcion_intervencion"] = body.descripcion_intervencion.strip()
+        if body.observaciones is not None:
+            update_fields["observaciones"] = body.observaciones.strip()
+        if body.direccion is not None:
+            update_fields["direccion"] = body.direccion.strip()
+
+        if len(update_fields) <= 2:
+            raise HTTPException(status_code=400, detail="Se debe enviar al menos un campo a actualizar")
+
+        await asyncio.to_thread(doc_ref.update, update_fields)
+
+        logger.info(
+            f"[PATCH-CAMPOS] Reporte {reporte_id} actualizado por {current_user.email}: {list(update_fields.keys())}"
+        )
+
+        # Retornar el reporte actualizado (datos originales + cambios)
+        data.update(update_fields)
+        data["id"] = reporte_id
+
+        return {
+            "success": True,
+            "id": reporte_id,
+            "message": "Reporte actualizado correctamente",
+            "campos_actualizados": [k for k in update_fields if k not in ("ultima_edicion_campos", "editado")],
+            "data": _limpiar_reporte(data),
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error actualizando campos reporte {reporte_id}: {e}")
+        raise HTTPException(status_code=500, detail=f"Error actualizando reporte: {str(e)}")
 
 
 @router.post(
@@ -3208,6 +3374,10 @@ async def get_reportes_intervenciones_todos(
 
     if s3_client and page_items:
         enriquecer_reportes_con_enlaces(page_items, s3_client, bucket_name)
+
+    # Enriquecer con datos de actividad asociada (solo en modo no-slim para no inflar el payload)
+    if not slim and page_items:
+        await _enriquecer_con_actividad(page_items)
 
     # Proyección slim: omitir coordinates y campos de detalle
     if slim:
