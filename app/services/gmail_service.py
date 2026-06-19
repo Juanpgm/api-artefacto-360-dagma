@@ -8,6 +8,8 @@ Si ninguno está configurado, el envío falla silenciosamente con un log de adve
 import os
 import base64
 import smtplib
+import socket
+import time
 import logging
 import hashlib
 from datetime import datetime, timezone, timedelta
@@ -50,7 +52,7 @@ def _render_template(name: str, context: dict) -> str:
 # Registramos cada envío en `notifications_log` y disparamos alertas a admin
 # cuando se cruzan los umbrales 80% / 95%.
 # ---------------------------------------------------------------------------
-DAILY_EMAIL_QUOTA = int(os.getenv('EMAIL_DAILY_QUOTA', '100'))
+DAILY_EMAIL_QUOTA = int(os.getenv('EMAIL_DAILY_QUOTA', '450'))
 QUOTA_WARN_THRESHOLD = float(os.getenv('EMAIL_QUOTA_WARN', '0.80'))
 QUOTA_BLOCK_THRESHOLD = float(os.getenv('EMAIL_QUOTA_BLOCK', '0.95'))
 
@@ -253,10 +255,18 @@ def _send_via_smtp(msg: MIMEMultipart, to: str) -> bool:
 
 
 def _send_raw_email(to: str, subject: str, html_body: str,
-                    ics_bytes: bytes = None, template: str = '') -> bool:
-    """Envío directo sin chequeo de cuota (uso interno y para alertas)."""
+                    ics_bytes: bytes = None, template: str = '',
+                    max_attempts: int = 3) -> bool:
+    """Envío directo sin chequeo de cuota (uso interno y para alertas).
+
+    Reintenta hasta `max_attempts` veces con backoff exponencial ante fallos
+    transitorios. Los errores HTTP 4xx (excepto 429) se tratan como fallos
+    permanentes y no se reintenta.
+    """
     sender_name = os.getenv('SMTP_SENDER_NAME', 'DAGMA Artefacto 360')
     sender = os.getenv('GMAIL_SENDER') or os.getenv('SMTP_USER', '')
+    ok = False
+    last_error = ''
     try:
         msg = _build_mime_message(sender, sender_name, to, subject, html_body, ics_bytes)
         gmail_configured = bool(
@@ -264,14 +274,48 @@ def _send_raw_email(to: str, subject: str, html_body: str,
             os.getenv('GMAIL_CLIENT_SECRET') and
             os.getenv('GMAIL_REFRESH_TOKEN')
         )
-        ok = False
-        if gmail_configured:
-            ok = _send_via_gmail_api(msg, to)
-            if not ok:
-                logger.warning(f"[EMAIL] Gmail API falló para {to}, intentando SMTP...")
-        if not ok:
-            ok = _send_via_smtp(msg, to)
-        _log_notification(to, subject, template, 'sent' if ok else 'failed')
+        for attempt in range(max_attempts):
+            try:
+                if gmail_configured:
+                    try:
+                        ok = _send_via_gmail_api(msg, to)
+                    except HttpError as http_err:
+                        status = getattr(http_err.resp, 'status', None)
+                        if status is not None and 400 <= int(status) < 500 and int(status) != 429:
+                            # Permanent client error — do not retry.
+                            logger.error(
+                                f"[EMAIL] HttpError permanente {status} enviando a {to}: {http_err}"
+                            )
+                            _log_notification(to, subject, template, 'failed', error=str(http_err))
+                            return False
+                        # Transient: 5xx or 429 — fall through to sleep+retry.
+                        logger.warning(
+                            f"[EMAIL] HttpError transitorio {status} enviando a {to} "
+                            f"(intento {attempt + 1}/{max_attempts}): {http_err}"
+                        )
+                        ok = False
+                    if ok:
+                        break
+                    logger.warning(f"[EMAIL] Gmail API falló para {to}, intentando SMTP...")
+                # Gmail not configured OR Gmail failed — try SMTP.
+                ok = _send_via_smtp(msg, to)
+                if ok:
+                    break
+            except (smtplib.SMTPException, socket.error, OSError) as transport_err:
+                logger.warning(
+                    f"[EMAIL] Error de transporte enviando a {to} "
+                    f"(intento {attempt + 1}/{max_attempts}): {transport_err}"
+                )
+                last_error = str(transport_err)
+                ok = False
+
+            if not ok and attempt < max_attempts - 1:
+                sleep_secs = min(2 ** attempt, 8)
+                logger.info(f"[EMAIL] Reintentando en {sleep_secs}s (intento {attempt + 1}/{max_attempts})")
+                time.sleep(sleep_secs)
+
+        _log_notification(to, subject, template, 'sent' if ok else 'failed',
+                          error='' if ok else last_error)
         return ok
     except Exception as e:
         logger.error(f"[EMAIL] Error inesperado enviando a {to}: {e}")
@@ -280,15 +324,17 @@ def _send_raw_email(to: str, subject: str, html_body: str,
 
 
 def _send_email(to: str, subject: str, html_body: str,
-                ics_bytes: bytes = None, template: str = '') -> bool:
+                ics_bytes: bytes = None, template: str = '',
+                critical: bool = False, max_attempts: int = 3) -> bool:
     """
     Envía un correo con adjunto iCal opcional y control de cuota diaria.
-    Si se supera el 95% de la cuota diaria, NO envía y registra el bloqueo.
+    Si se supera el 95% de la cuota diaria, NO envía y registra el bloqueo —
+    EXCEPTO cuando `critical=True`, en cuyo caso el envío procede siempre.
     Si se supera el 80%, dispara una alerta admin (dedup por día).
     Retorna True si tuvo éxito, False en caso contrario (nunca propaga excepciones).
     """
     count = _count_sent_last_24h()
-    if count >= int(DAILY_EMAIL_QUOTA * QUOTA_BLOCK_THRESHOLD):
+    if not critical and count >= int(DAILY_EMAIL_QUOTA * QUOTA_BLOCK_THRESHOLD):
         logger.error(
             f"[QUOTA] Bloqueo de envío a {to}: {count}/{DAILY_EMAIL_QUOTA} "
             f"correos en las últimas 24h (≥{int(QUOTA_BLOCK_THRESHOLD*100)}%)."
@@ -297,7 +343,8 @@ def _send_email(to: str, subject: str, html_body: str,
         _maybe_alert_quota(count)
         return False
     _maybe_alert_quota(count)
-    return _send_raw_email(to, subject, html_body, ics_bytes=ics_bytes, template=template)
+    return _send_raw_email(to, subject, html_body, ics_bytes=ics_bytes, template=template,
+                           max_attempts=max_attempts)
 
 
 def _google_maps_url(actividad_data: dict) -> str:
@@ -567,7 +614,7 @@ def send_activity_cancellation_email(
             'nombre': nombre,
             'actividad': actividad_view,
         })
-        return _send_email(to_email, subject, html, template='activity_cancellation')
+        return _send_email(to_email, subject, html, template='activity_cancellation', critical=True)
     except Exception as e:
         logger.error(f"[EMAIL] Error enviando cancelación a {to_email}: {e}")
         return False

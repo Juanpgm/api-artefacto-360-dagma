@@ -26,19 +26,19 @@ USERS = {
         "uid": "uid-operador",
         "email": "operador@dagma.gov.co",
         "role": "operador",
-        "grupo": "cuadrilla",
+        "grupo": "flora_urbana",
     },
     "lider": {
         "uid": "uid-lider",
         "email": "lider@dagma.gov.co",
         "role": "lider",
-        "grupo": "cuadrilla",
+        "grupo": "flora_urbana",
     },
     "admin": {
         "uid": "uid-admin",
         "email": "admin@dagma.gov.co",
         "role": "administrador",
-        "grupo": "cuadrilla",
+        "grupo": "flora_urbana",
     },
     "dev": {
         "uid": "uid-dev",
@@ -241,7 +241,7 @@ class TestLeaderCatalog:
 # ---------------------------------------------------------------------------
 
 class TestChangeRole:
-    def _setup_target_user(self, mocks, target_uid: str, target_role: str, target_grupo: str = "cuadrilla"):
+    def _setup_target_user(self, mocks, target_uid: str, target_role: str, target_grupo: str = "flora_urbana"):
         """Configura Firestore para que el usuario objetivo tenga los datos indicados."""
         target_doc = MagicMock()
         target_doc.exists = True
@@ -354,7 +354,7 @@ class TestChangeRole:
 
 class TestReportesGrupoScope:
     def test_operador_cuadrilla_cannot_access_vivero(self, mock_firebase):
-        """Operador de cuadrilla no puede ver reportes de vivero."""
+        """Operador de flora_urbana no puede ver reportes de vivero."""
         client = _get_client_for_user("operador", mock_firebase)
         r = client.get(
             "/grupos/vivero/reportes_intervenciones",
@@ -363,7 +363,7 @@ class TestReportesGrupoScope:
         assert r.status_code == 403
 
     def test_lider_cuadrilla_cannot_access_gobernanza(self, mock_firebase):
-        """Líder de cuadrilla no puede ver reportes de gobernanza."""
+        """Líder de flora_urbana no puede ver reportes de gobernanza."""
         client = _get_client_for_user("lider", mock_firebase)
         r = client.get(
             "/grupos/gobernanza/reportes_intervenciones",
@@ -452,3 +452,29 @@ class TestSeguimientoPermisos:
         client = TestClient(app, raise_server_exceptions=False)
         r = client.get("/api/v1/reportes/rep-123/historial")
         assert r.status_code in (401, 403, 422)
+
+
+# ---------------------------------------------------------------------------
+# Tests: canonical_grupo_key backward-compat mapping
+# ---------------------------------------------------------------------------
+
+class TestCanonicalGrupoKey:
+    def test_cuadrilla_maps_to_flora_urbana(self):
+        """Stale Firestore data with grupo='cuadrilla' must resolve to 'flora_urbana'."""
+        from app.utils.text_utils import canonical_grupo_key
+        assert canonical_grupo_key("cuadrilla") == "flora_urbana"
+
+    def test_flora_urbana_maps_to_flora_urbana(self):
+        from app.utils.text_utils import canonical_grupo_key
+        assert canonical_grupo_key("flora_urbana") == "flora_urbana"
+
+    def test_flora_urbana_display_name_maps_correctly(self):
+        from app.utils.text_utils import canonical_grupo_key
+        assert canonical_grupo_key("Flora urbana") == "flora_urbana"
+
+    def test_other_grupos_unaffected(self):
+        from app.utils.text_utils import canonical_grupo_key
+        assert canonical_grupo_key("vivero") == "vivero"
+        assert canonical_grupo_key("gobernanza") == "gobernanza"
+        assert canonical_grupo_key("ecosistemas") == "ecosistemas"
+        assert canonical_grupo_key("umata") == "umata"

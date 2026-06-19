@@ -25,7 +25,7 @@ You are a senior backend developer with deep ownership of this codebase. You kno
 
 | Group | Collection | Description |
 |-------|-----------|-------------|
-| Cuadrilla | `reportes_intervenciones_grupo_cuadrilla` | Maintenance crews for green zones |
+| Flora urbana | `reportes_intervenciones` | Intervenciones de Flora Urbana: poda, tala, mantenimiento |
 | Vivero | `reportes_intervenciones_grupo_vivero` | Nursery operations |
 | Gobernanza | `reportes_intervenciones_grupo_gobernanza` | Environmental governance |
 | Ecosistemas | `reportes_intervenciones_grupo_ecosistemas` | Ecosystem management |

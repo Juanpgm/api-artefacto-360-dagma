@@ -21,7 +21,7 @@ USER_WITH_GRUPO = {
     "uid": "uid-con-grupo",
     "email": "existente@dagma.gov.co",
     "role": "operador",
-    "grupo": "Cuadrilla 1",
+    "grupo": "Flora urbana",
     "full_name": "Existente User",
 }
 
@@ -106,7 +106,8 @@ def client_with_user(request):
     patches = [
         patch("app.routes.auth_routes.db", db_mock),
         patch("app.routes.auth_routes.auth_client", auth_mock),
-        patch("app.routes.auth_routes._get_s3_photo_url", return_value=None),
+        patch("app.services.auth_service.auth_client", auth_mock),
+        patch("app.routes.auth_routes.get_s3_photo_url", return_value=None),
     ]
     for p in patches:
         p.start()
@@ -128,7 +129,8 @@ class TestValidateSession:
         with (
             patch("app.routes.auth_routes.db", db_mock),
             patch("app.routes.auth_routes.auth_client", auth_mock),
-            patch("app.routes.auth_routes._get_s3_photo_url", return_value=None),
+            patch("app.services.auth_service.auth_client", auth_mock),
+            patch("app.routes.auth_routes.get_s3_photo_url", return_value=None),
         ):
             from main import app
             client = TestClient(app)
@@ -153,7 +155,8 @@ class TestValidateSession:
         with (
             patch("app.routes.auth_routes.db", db_mock),
             patch("app.routes.auth_routes.auth_client", auth_mock),
-            patch("app.routes.auth_routes._get_s3_photo_url", return_value=None),
+            patch("app.services.auth_service.auth_client", auth_mock),
+            patch("app.routes.auth_routes.get_s3_photo_url", return_value=None),
         ):
             from main import app
             client = TestClient(app)
@@ -173,7 +176,8 @@ class TestValidateSession:
         with (
             patch("app.routes.auth_routes.db", db_mock),
             patch("app.routes.auth_routes.auth_client", auth_mock),
-            patch("app.routes.auth_routes._get_s3_photo_url", return_value=None),
+            patch("app.services.auth_service.auth_client", auth_mock),
+            patch("app.routes.auth_routes.get_s3_photo_url", return_value=None),
         ):
             from main import app
             client = TestClient(app)
@@ -216,7 +220,7 @@ class TestCompleteGoogleProfile:
             "email": USER_WITH_GRUPO["email"],
             "full_name": USER_WITH_GRUPO["full_name"],
             "role": "operador",
-            "grupo": "Cuadrilla 1",
+            "grupo": "Flora urbana",
         }
         return doc
 
@@ -228,7 +232,7 @@ class TestCompleteGoogleProfile:
             # authz.py (get_current_user dependency) has its own reference
             patch("app.deps.authz.auth_client", auth_mock),
             patch("app.deps.authz.db", db_mock),
-            patch("app.routes.auth_routes._get_s3_photo_url", return_value=None),
+            patch("app.routes.auth_routes.get_s3_photo_url", return_value=None),
         ]
 
     def test_completes_profile_successfully(self):
@@ -243,7 +247,7 @@ class TestCompleteGoogleProfile:
              patch("app.routes.auth_routes.auth_client", auth_mock), \
              patch("app.deps.authz.auth_client", auth_mock), \
              patch("app.deps.authz.db", db_mock), \
-             patch("app.routes.auth_routes._get_s3_photo_url", return_value=None):
+             patch("app.routes.auth_routes.get_s3_photo_url", return_value=None):
             resp = client.post(
                 "/auth/complete-google-profile",
                 json={"grupo": "Cuadrilla", "full_name": "Nuevo User"},
@@ -252,9 +256,9 @@ class TestCompleteGoogleProfile:
 
         assert resp.status_code == 200
         data = resp.json()
-        # El backend canonicaliza con normalize_grupo (lower + sin acentos + espacios)
+        # El backend canonicaliza con canonical_grupo_key: "Cuadrilla" -> "flora_urbana"
         assert data["success"] is True
-        assert data["grupo"] == "cuadrilla"
+        assert data["grupo"] == "flora_urbana"
         db_mock.collection.return_value.document.return_value.update.assert_called_once()
 
     def test_fails_when_grupo_already_set(self):
@@ -269,7 +273,7 @@ class TestCompleteGoogleProfile:
              patch("app.routes.auth_routes.auth_client", auth_mock), \
              patch("app.deps.authz.auth_client", auth_mock), \
              patch("app.deps.authz.db", db_mock), \
-             patch("app.routes.auth_routes._get_s3_photo_url", return_value=None):
+             patch("app.routes.auth_routes.get_s3_photo_url", return_value=None):
             resp = client.post(
                 "/auth/complete-google-profile",
                 json={"grupo": "Cuadrilla"},
@@ -291,7 +295,7 @@ class TestCompleteGoogleProfile:
              patch("app.routes.auth_routes.auth_client", auth_mock), \
              patch("app.deps.authz.auth_client", auth_mock), \
              patch("app.deps.authz.db", db_mock), \
-             patch("app.routes.auth_routes._get_s3_photo_url", return_value=None):
+             patch("app.routes.auth_routes.get_s3_photo_url", return_value=None):
             resp = client.post(
                 "/auth/complete-google-profile",
                 json={"grupo": "   "},
@@ -320,7 +324,8 @@ class TestLoginEndpoint:
         with (
             patch("app.routes.auth_routes.db", db_mock),
             patch("app.routes.auth_routes.auth_client", auth_mock),
-            patch("app.routes.auth_routes._get_s3_photo_url", return_value=None),
+            patch("app.services.auth_service.auth_client", auth_mock),
+            patch("app.routes.auth_routes.get_s3_photo_url", return_value=None),
         ):
             from main import app
             # Use standard TestClient without raise_server_exceptions to see

@@ -1,5 +1,5 @@
 """Tests de la utilidad de normalización de nombres de grupo."""
-from app.utils.text_utils import normalize_grupo, grupos_match, strip_accents
+from app.utils.text_utils import normalize_grupo, grupos_match, strip_accents, canonical_grupo_key
 
 
 class TestNormalizeGrupo:
@@ -60,3 +60,53 @@ class TestNormalizeGrupo:
         assert grupos_match("Flora Urbana", "FLORA_URBANA")
         assert grupos_match("Reacción", "reaccion")
         assert grupos_match("Reacción", "REACCION")
+
+
+class TestCanonicalGrupoKey:
+    # --- Flora urbana family (all variants → "flora_urbana") ---
+    def test_cuadrilla_lowercase(self):
+        assert canonical_grupo_key("cuadrilla") == "flora_urbana"
+
+    def test_cuadrilla_capitalized(self):
+        assert canonical_grupo_key("Cuadrilla") == "flora_urbana"
+
+    def test_cuadrilla_uppercase(self):
+        assert canonical_grupo_key("CUADRILLA") == "flora_urbana"
+
+    def test_flora_urbana_mixed_case(self):
+        assert canonical_grupo_key("Flora Urbana") == "flora_urbana"
+
+    def test_flora_urbana_correct_case(self):
+        assert canonical_grupo_key("Flora urbana") == "flora_urbana"
+
+    def test_flora_urbana_lowercase(self):
+        assert canonical_grupo_key("flora urbana") == "flora_urbana"
+
+    def test_flora_urbana_with_cuadrilla_suffix(self):
+        assert canonical_grupo_key("Flora urbana (cuadrilla)") == "flora_urbana"
+
+    def test_flora_urbana_canonical_key_is_idempotent(self):
+        assert canonical_grupo_key("flora_urbana") == "flora_urbana"
+
+    # --- Other groups (must NOT be remapped) ---
+    def test_vivero_unchanged(self):
+        assert canonical_grupo_key("vivero") == "vivero"
+
+    def test_gobernanza_normalized_but_unchanged(self):
+        assert canonical_grupo_key("Gobernanza") == "gobernanza"
+
+    def test_ecosistemas_unchanged(self):
+        assert canonical_grupo_key("ecosistemas") == "ecosistemas"
+
+    def test_umata_unchanged(self):
+        assert canonical_grupo_key("UMATA") == "umata"
+
+    # --- Edge cases ---
+    def test_none_returns_empty_string(self):
+        assert canonical_grupo_key(None) == ""
+
+    def test_empty_string_returns_empty_string(self):
+        assert canonical_grupo_key("") == ""
+
+    def test_whitespace_only_returns_empty_string(self):
+        assert canonical_grupo_key("   ") == ""

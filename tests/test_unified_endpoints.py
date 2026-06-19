@@ -15,7 +15,9 @@ DECODED_TOKEN = {
     "grupo": None,
 }
 AUTH_HEADERS = {"Authorization": "Bearer mock-token-admin"}
-GRUPOS_VALIDOS = ["cuadrilla", "vivero", "gobernanza", "ecosistemas", "umata"]
+GRUPOS_VALIDOS = ["flora_urbana", "vivero", "gobernanza", "ecosistemas", "umata"]
+# Legacy URL slugs: the /grupo-{slug}/... routes use the old naming ("cuadrilla" not "flora_urbana")
+GRUPOS_LEGACY_SLUGS = ["cuadrilla", "vivero", "gobernanza", "ecosistemas", "umata"]
 
 from app.main import app
 client = TestClient(app)
@@ -61,7 +63,7 @@ class TestGruposConfig:
     def test_grupos_config_import(self):
         from app.routes.artefacto_360_routes import GRUPOS_CONFIG, GRUPOS_VALIDOS
         assert len(GRUPOS_CONFIG) == 5
-        assert set(GRUPOS_VALIDOS) == {"cuadrilla", "vivero", "gobernanza", "ecosistemas", "umata"}
+        assert set(GRUPOS_VALIDOS) == {"flora_urbana", "vivero", "gobernanza", "ecosistemas", "umata"}
 
     def test_grupo_config_has_required_fields(self):
         from app.routes.artefacto_360_routes import GRUPOS_CONFIG
@@ -72,8 +74,8 @@ class TestGruposConfig:
 
     def test_get_grupo_config_valid(self):
         from app.routes.artefacto_360_routes import get_grupo_config, COLLECTION_REPORTES_INTERVENCIONES
-        config = get_grupo_config("cuadrilla")
-        assert config["display_name"] == "Cuadrilla"
+        config = get_grupo_config("flora_urbana")
+        assert config["display_name"] == "Flora urbana"
         assert config["s3_prefix"] == "cuadrilla"
         assert COLLECTION_REPORTES_INTERVENCIONES == "reportes_intervenciones"
 
@@ -93,7 +95,7 @@ class TestValidateGrupoSpecificFields:
 
     def test_cuadrilla_valid_arboles(self):
         from app.routes.artefacto_360_routes import validate_grupo_specific_fields
-        result = validate_grupo_specific_fields("cuadrilla", '[{"especie": "Ceiba", "cantidad": 5}]', None, None, None)
+        result = validate_grupo_specific_fields("flora_urbana", '[{"especie": "Ceiba", "cantidad": 5}]', None, None, None)
         assert len(result["arboles"]) == 1
         assert result["arboles"][0]["especie"] == "Ceiba"
 
@@ -101,12 +103,12 @@ class TestValidateGrupoSpecificFields:
         from app.routes.artefacto_360_routes import validate_grupo_specific_fields
         from fastapi import HTTPException
         with pytest.raises(HTTPException) as exc:
-            validate_grupo_specific_fields("cuadrilla", "invalid json", None, None, None)
+            validate_grupo_specific_fields("flora_urbana", "invalid json", None, None, None)
         assert exc.value.status_code == 400
 
     def test_cuadrilla_no_arboles(self):
         from app.routes.artefacto_360_routes import validate_grupo_specific_fields
-        assert validate_grupo_specific_fields("cuadrilla", None, None, None, None)["arboles"] is None
+        assert validate_grupo_specific_fields("flora_urbana", None, None, None, None)["arboles"] is None
 
     def test_vivero_valid_tipos_plantas(self):
         from app.routes.artefacto_360_routes import validate_grupo_specific_fields
@@ -162,16 +164,16 @@ class TestUnifiedPostEndpoint:
         assert r.json()["success"] is True
 
     def test_post_cuadrilla_con_arboles(self, mock_firebase_db, mock_s3, mock_auth):
-        r = client.post("/grupos/cuadrilla/reporte_intervencion",
+        r = client.post("/grupos/flora_urbana/reporte_intervencion",
             data={"tipo_intervencion": "Poda", "arboles_data": '[{"especie": "Ceiba", "cantidad": 3}]'},
             headers=AUTH_HEADERS)
         assert r.status_code == 200
         saved = mock_firebase_db.collection.return_value.document.return_value.set.call_args[0][0]
         assert saved["arboles"][0]["especie"] == "Ceiba"
-        assert saved["grupo"] == "cuadrilla"
+        assert saved["grupo"] == "flora_urbana"
 
     def test_post_cuadrilla_arboles_invalidos(self, mock_firebase_db, mock_s3, mock_auth):
-        r = client.post("/grupos/cuadrilla/reporte_intervencion",
+        r = client.post("/grupos/flora_urbana/reporte_intervencion",
             data={"tipo_intervencion": "Poda", "arboles_data": "no-es-json"},
             headers=AUTH_HEADERS)
         assert r.status_code == 400
@@ -195,14 +197,14 @@ class TestUnifiedPostEndpoint:
         assert saved["unidades_impactadas"] == 25
 
     def test_post_con_coordenadas_point(self, mock_firebase_db, mock_s3, mock_auth):
-        r = client.post("/grupos/cuadrilla/reporte_intervencion",
+        r = client.post("/grupos/flora_urbana/reporte_intervencion",
             data={"tipo_intervencion": "Insp", "coordinates_type": "Point", "coordinates_data": "[-76.5225, 3.4516]"},
             headers=AUTH_HEADERS)
         assert r.status_code == 200
         assert r.json()["coordinates"]["type"] == "Point"
 
     def test_post_geometria_invalida(self, mock_firebase_db, mock_s3, mock_auth):
-        r = client.post("/grupos/cuadrilla/reporte_intervencion",
+        r = client.post("/grupos/flora_urbana/reporte_intervencion",
             data={"tipo_intervencion": "T", "coordinates_type": "InvalidType", "coordinates_data": "[-76.5, 3.4]"},
             headers=AUTH_HEADERS)
         assert r.status_code == 400
@@ -230,16 +232,23 @@ class TestUnifiedPostEndpoint:
             mock_firebase_db.collection.assert_called_with("reportes_intervenciones")
 
     def test_post_grupo_key_prevalece_sobre_form(self, mock_firebase_db, mock_s3, mock_auth):
-        r = client.post("/grupos/cuadrilla/reporte_intervencion",
+        r = client.post("/grupos/flora_urbana/reporte_intervencion",
             data={"tipo_intervencion": "T", "grupo": "Cuadrilla Verde A"},
             headers=AUTH_HEADERS)
         assert r.status_code == 200
         saved = mock_firebase_db.collection.return_value.document.return_value.set.call_args[0][0]
-        assert saved["grupo"] == "cuadrilla"
+        assert saved["grupo"] == "flora_urbana"
 
     def test_post_sin_auth_retorna_403(self):
-        r = client.post("/grupos/cuadrilla/reporte_intervencion", data={"tipo_intervencion": "T"})
+        r = client.post("/grupos/flora_urbana/reporte_intervencion", data={"tipo_intervencion": "T"})
         assert r.status_code == 403  # HTTPBearer returns 403 when Authorization header is missing
+
+    def test_legacy_cuadrilla_url_still_works(self, mock_firebase_db, mock_s3, mock_auth):
+        """Backward-compat: /grupos/cuadrilla/... still resolves via canonical_grupo_key mapping."""
+        r = client.post("/grupos/cuadrilla/reporte_intervencion",
+            data={"tipo_intervencion": "Poda"},
+            headers=AUTH_HEADERS)
+        assert r.status_code == 200
 
 
 class TestUnifiedGetEndpoint:
@@ -258,7 +267,7 @@ class TestUnifiedGetEndpoint:
         assert data["data"] == []
 
     def test_get_filtro_id_actividad(self, mock_firebase_db, mock_s3, mock_auth):
-        r = client.get("/grupos/cuadrilla/reportes_intervenciones?id_actividad=ACT-123", headers=AUTH_HEADERS)
+        r = client.get("/grupos/flora_urbana/reportes_intervenciones?id_actividad=ACT-123", headers=AUTH_HEADERS)
         assert r.status_code == 200
         assert r.json()["filters"]["id_actividad"] == "ACT-123"
 
@@ -271,9 +280,9 @@ class TestUnifiedGetEndpoint:
         mock_doc = Mock()
         mock_doc.exists = True
         mock_doc.id = "doc-001"
-        mock_doc.to_dict.return_value = {"id": "doc-001", "tipo_intervencion": "Poda", "timestamp": "2026-01-01", "grupo": "cuadrilla"}
+        mock_doc.to_dict.return_value = {"id": "doc-001", "tipo_intervencion": "Poda", "timestamp": "2026-01-01", "grupo": "flora_urbana"}
         mock_firebase_db.collection.return_value.document.return_value.get.return_value = mock_doc
-        r = client.get("/grupos/cuadrilla/reportes_intervenciones?id=doc-001", headers=AUTH_HEADERS)
+        r = client.get("/grupos/flora_urbana/reportes_intervenciones?id=doc-001", headers=AUTH_HEADERS)
         assert r.status_code == 200
         assert r.json()["total"] == 1
 
@@ -283,7 +292,7 @@ class TestUnifiedGetEndpoint:
         mock_doc.id = "doc-vivero"
         mock_doc.to_dict.return_value = {"id": "doc-vivero", "tipo_intervencion": "S", "timestamp": "2026-01-01", "grupo": "vivero"}
         mock_firebase_db.collection.return_value.document.return_value.get.return_value = mock_doc
-        r = client.get("/grupos/cuadrilla/reportes_intervenciones?id=doc-vivero", headers=AUTH_HEADERS)
+        r = client.get("/grupos/flora_urbana/reportes_intervenciones?id=doc-vivero", headers=AUTH_HEADERS)
         assert r.status_code == 200
         assert r.json()["total"] == 0
 
@@ -297,19 +306,19 @@ class TestUnifiedGetEndpoint:
             mock_firebase_db.collection.assert_called_with("reportes_intervenciones")
 
     def test_get_sin_auth_retorna_403(self):
-        r = client.get("/grupos/cuadrilla/reportes_intervenciones")
+        r = client.get("/grupos/flora_urbana/reportes_intervenciones")
         assert r.status_code == 403  # HTTPBearer returns 403 when Authorization header is missing
 
 
 class TestLegacyRoutes:
 
-    @pytest.mark.parametrize("grupo", GRUPOS_VALIDOS)
+    @pytest.mark.parametrize("grupo", GRUPOS_LEGACY_SLUGS)
     def test_legacy_post_routes(self, grupo, mock_firebase_db, mock_s3):
         r = client.post(f"/grupo-{grupo}/reporte_intervencion", data={"tipo_intervencion": "Test"})
         assert r.status_code == 200
         assert r.json()["success"] is True
 
-    @pytest.mark.parametrize("grupo", GRUPOS_VALIDOS)
+    @pytest.mark.parametrize("grupo", GRUPOS_LEGACY_SLUGS)
     def test_legacy_get_routes(self, grupo, mock_firebase_db, mock_s3):
         r = client.get(f"/grupo-{grupo}/reportes_intervenciones")
         assert r.status_code == 200
@@ -322,6 +331,8 @@ class TestLegacyRoutes:
         assert r.status_code == 200
         saved = mock_firebase_db.collection.return_value.document.return_value.set.call_args[0][0]
         assert saved["arboles"][0]["especie"] == "Ceiba"
+        # Legacy route now internally resolves to flora_urbana canonical key
+        assert saved["grupo"] == "flora_urbana"
 
     def test_legacy_vivero_con_tipos_plantas(self, mock_firebase_db, mock_s3):
         r = client.post("/grupo-vivero/reporte_intervencion",
@@ -367,7 +378,7 @@ class TestLegacyRoutes:
 class TestResponseStructure:
 
     def test_post_response_fields(self, mock_firebase_db, mock_s3, mock_auth):
-        r = client.post("/grupos/cuadrilla/reporte_intervencion",
+        r = client.post("/grupos/flora_urbana/reporte_intervencion",
             data={"tipo_intervencion": "Test"}, headers=AUTH_HEADERS)
         assert r.status_code == 200
         data = r.json()

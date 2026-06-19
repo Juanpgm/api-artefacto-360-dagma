@@ -56,14 +56,12 @@ async def _resolver_lider_actividad_async(actividad_data: dict) -> tuple[str, st
         seen: set[str] = set()
         for rol_field in ("role", "rol"):
             try:
-                docs = await asyncio.to_thread(
-                    lambda rf=rol_field: list(
-                        db.collection("users")
-                        .where(rf, "in", ["lider", "líder", "LIDER", "LÍDER"])
-                        .limit(500)
-                        .stream()
-                    )
+                query = (
+                    db.collection("users")
+                    .where(rol_field, "in", ["lider", "líder", "LIDER", "LÍDER"])
+                    .limit(500)
                 )
+                docs = await stream_to_list(query)
             except Exception:
                 continue
             for udoc in docs:
@@ -97,10 +95,8 @@ async def _resolver_lider_telefono_async(lider_email: str, lider_nombre: str) ->
     # 1. Buscar en users por email
     if lider_email and "@" in lider_email:
         try:
-            docs = await asyncio.to_thread(
-                lambda: list(
-                    db.collection("users").where("email", "==", lider_email).limit(1).stream()
-                )
+            docs = await stream_to_list(
+                db.collection("users").where("email", "==", lider_email).limit(1)
             )
             for udoc in docs:
                 ud = udoc.to_dict() or {}
@@ -111,13 +107,8 @@ async def _resolver_lider_telefono_async(lider_email: str, lider_nombre: str) ->
             pass
         # 2. Buscar en personal_operativo por email
         try:
-            docs = await asyncio.to_thread(
-                lambda: list(
-                    db.collection("personal_operativo")
-                    .where("email", "==", lider_email)
-                    .limit(1)
-                    .stream()
-                )
+            docs = await stream_to_list(
+                db.collection("personal_operativo").where("email", "==", lider_email).limit(1)
             )
             for udoc in docs:
                 ud = udoc.to_dict() or {}
@@ -129,13 +120,10 @@ async def _resolver_lider_telefono_async(lider_email: str, lider_nombre: str) ->
     # 3. Buscar en personal_operativo por nombre_completo
     if lider_nombre:
         try:
-            docs = await asyncio.to_thread(
-                lambda: list(
-                    db.collection("personal_operativo")
-                    .where("nombre_completo", "==", lider_nombre.strip())
-                    .limit(1)
-                    .stream()
-                )
+            docs = await stream_to_list(
+                db.collection("personal_operativo")
+                .where("nombre_completo", "==", lider_nombre.strip())
+                .limit(1)
             )
             for udoc in docs:
                 ud = udoc.to_dict() or {}
@@ -151,6 +139,80 @@ async def _resolver_lider_telefono_async(lider_email: str, lider_nombre: str) ->
     return None
 
 
+async def _recuperar_email_persona(nombre: str, email_actual: str) -> "str | None":
+    """Intenta recuperar un email válido para una persona del personal_asignado.
+
+    Si `email_actual` ya es válido, lo devuelve de inmediato.
+    Si no, busca por nombre_completo en `users` (insensible a tildes/mayúsculas)
+    y luego en `personal_operativo`. Devuelve None si no encuentra nada.
+    """
+    if email_actual and "@" in email_actual:
+        return email_actual.strip().lower()
+    if not nombre or not nombre.strip():
+        return None
+    target = strip_accents(nombre.strip()).lower()
+    # 1. Buscar en users por nombre
+    try:
+        for rol_field in ("role", "rol"):
+            try:
+                query = db.collection("users").limit(500)
+                docs = await stream_to_list(query)
+            except Exception:
+                continue
+            for udoc in docs:
+                ud = udoc.to_dict() or {}
+                for campo in ("full_name", "nombre_completo", "displayName"):
+                    nombre_db = (ud.get(campo) or "").strip()
+                    if nombre_db and strip_accents(nombre_db).lower() == target:
+                        email_found = (ud.get("email") or "").strip().lower()
+                        if email_found and "@" in email_found:
+                            return email_found
+            break  # solo un rol_field loop es suficiente para la colección users
+    except Exception as e:
+        logger.warning(f"[NOTIFY] Error buscando email de '{nombre}' en users: {e}")
+    # 2. Buscar en personal_operativo por nombre_completo
+    try:
+        docs = await stream_to_list(
+            db.collection("personal_operativo")
+            .where("nombre_completo", "==", nombre.strip())
+            .limit(5)
+        )
+        for udoc in docs:
+            ud = udoc.to_dict() or {}
+            email_found = (ud.get("email") or "").strip().lower()
+            if email_found and "@" in email_found:
+                return email_found
+    except Exception as e:
+        logger.warning(f"[NOTIFY] Error buscando email de '{nombre}' en personal_operativo: {e}")
+    return None
+
+
+async def _resolver_destinatarios_actividad_async(actividad_data: dict) -> dict:
+    """Versión async de _resolver_destinatarios_actividad que recupera emails faltantes.
+
+    Para cada persona en personal_asignado sin email embebido, intenta recuperar
+    su dirección consultando primero `users` y luego `personal_operativo`.
+    El setdefault por email_lower garantiza deduplicación.
+    """
+    # Partir del resultado sync (líder + personal con email embebido)
+    result: dict[str, str] = _resolver_destinatarios_actividad(actividad_data)
+
+    # Recuperar emails faltantes del personal_asignado
+    personal = actividad_data.get("personal_asignado") or []
+    nombres_sin_email = [
+        (p.get("nombre_completo", ""), p.get("email", ""))
+        for p in personal
+        if not (p.get("email", "") and "@" in p.get("email", ""))
+    ]
+    for nombre, email_actual in nombres_sin_email:
+        if not nombre:
+            continue
+        recovered = await _recuperar_email_persona(nombre, email_actual)
+        if recovered:
+            result.setdefault(recovered, nombre.strip() or recovered)
+    return result
+
+
 import math
 import os
 import io
@@ -159,7 +221,7 @@ import logging
 from pydantic import BaseModel, Field
 from app.models.validation import CoordinatesModel, ArbolesDataModel
 from app.utils.firestore_async import run_blocking, stream_to_list
-from app.utils.text_utils import normalize_grupo, grupos_match, strip_accents
+from app.utils.text_utils import normalize_grupo, grupos_match, strip_accents, canonical_grupo_key
 
 # Importar configuración de Firebase y S3/Storage
 from app.firebase_config import db
@@ -190,7 +252,7 @@ logger = logging.getLogger(__name__)
 from shapely.geometry import Point, shape
 from app.utils.spatial_index import SpatialIndex
 
-router = APIRouter(tags=["Artefacto de Captura DAGMA"])
+# router is assembled at the bottom of this file via include_router
 
 # ==================== CARGAR GEOJSONS ====================#
 # Cargar los archivos GeoJSON al iniciar la aplicación
@@ -541,8 +603,9 @@ def _get_next_numero_registro() -> int:
         return None
 
 GRUPOS_CONFIG = {
-    "cuadrilla": {
-        "display_name": "Cuadrilla",
+    "flora_urbana": {
+        "display_name": "Flora urbana",
+        # s3_prefix stays "cuadrilla" — changing it would orphan existing photos in S3
         "s3_prefix": "cuadrilla",
     },
     "vivero": {
@@ -568,7 +631,7 @@ GRUPOS_VALIDOS = list(GRUPOS_CONFIG.keys())
 
 def get_grupo_config(grupo: str) -> dict:
     """Obtiene la configuración de un grupo operativo o lanza 404."""
-    config = GRUPOS_CONFIG.get(grupo.lower())
+    config = GRUPOS_CONFIG.get(canonical_grupo_key(grupo))
     if not config:
         raise HTTPException(
             status_code=404,
@@ -598,7 +661,7 @@ def validate_grupo_specific_fields(
     """
     extra = {}
 
-    if grupo_key == "cuadrilla":
+    if grupo_key == "flora_urbana":
         arboles = None
         if arboles_data:
             try:
@@ -818,7 +881,7 @@ async def _post_reporte_intervencion(
             "descripcion_intervencion": descripcion_intervencion,
             "direccion": direccion,
             "registrado_por": registrado_por,
-            "grupo": grupo_key,  # Campo canónico desde URL, no del form
+            "grupo": canonical_grupo_key(grupo_key),  # Canonical key para queries consistentes
             "id_actividad": id_actividad,
             "observaciones": observaciones or "",
             "coordinates": geometry,
@@ -915,7 +978,7 @@ async def _get_reportes_intervenciones(
             if doc.exists:
                 data = doc.to_dict()
                 # Verificar que el reporte pertenece al grupo solicitado
-                if data.get("grupo") != grupo_key:
+                if canonical_grupo_key(data.get("grupo") or "") != canonical_grupo_key(grupo_key):
                     return {
                         "success": True,
                         "total": 0,
@@ -937,7 +1000,7 @@ async def _get_reportes_intervenciones(
 
             # Fallback: buscar por campo interno 'id' dentro del grupo
             fallback_q = reportes_ref.where("grupo", "==", grupo_key).where("id", "==", id).limit(50)
-            docs = await asyncio.to_thread(lambda: list(fallback_q.stream()))
+            docs = await stream_to_list(fallback_q)
             reportes = []
             for doc in docs:
                 data = doc.to_dict()
@@ -975,7 +1038,7 @@ async def _get_reportes_intervenciones(
         query = query.limit(effective_limit)
 
         # Obtener documentos sin bloquear el event loop
-        docs = await asyncio.to_thread(lambda: list(query.stream()))
+        docs = await stream_to_list(query)
 
         reportes = []
         for doc in docs:
@@ -1058,6 +1121,17 @@ async def _enriquecer_con_actividad(reportes: list) -> None:
         reporte["actividad_fecha"] = act.get("fecha_actividad")
 
 
+# ==================== SUB-ROUTERS ====================#
+# These are assembled into `router` at the bottom of this file.
+
+reports_router = APIRouter()
+legacy_reports_router = APIRouter()
+grupos_router = APIRouter()
+actividades_router = APIRouter()
+personal_router = APIRouter()
+asistencia_router = APIRouter()
+
+
 # ==================== RUTAS UNIFICADAS: /grupos/{grupo}/... ====================#
 
 
@@ -1066,7 +1140,7 @@ class UpdateCoordenadasRequest(BaseModel):
     coordinates_type: Optional[str] = Field("Point", description="Tipo de geometría GeoJSON")
 
 
-@router.patch(
+@reports_router.patch(
     "/grupos/{grupo_key}/reporte_intervencion/{reporte_id}/coordenadas",
     summary="🟡 PATCH | Actualizar Coordenadas de Reporte",
     description="""
@@ -1127,8 +1201,8 @@ async def patch_coordenadas_reporte(
 
         data = doc.to_dict() or {}
 
-        # Verificar grupo
-        if data.get("grupo") != grupo_key:
+        # Verificar grupo (canonicalizado para tolerar datos stale como "cuadrilla" → "flora_urbana")
+        if canonical_grupo_key(data.get("grupo", "")) != canonical_grupo_key(grupo_key):
             raise HTTPException(status_code=403, detail="El reporte no pertenece al grupo indicado")
 
         # Verificar autoría: operador solo puede editar sus propios reportes
@@ -1184,7 +1258,7 @@ class UpdateCamposReporteRequest(BaseModel):
     direccion: Optional[str] = Field(None, max_length=500, description="Nueva dirección")
 
 
-@router.patch(
+@reports_router.patch(
     "/grupos/{grupo_key}/reporte_intervencion/{reporte_id}",
     summary="🟡 PATCH | Editar Campos de Reporte",
     description="""
@@ -1232,8 +1306,8 @@ async def patch_campos_reporte(
 
         data = doc.to_dict() or {}
 
-        # Verificar grupo
-        if data.get("grupo") != grupo_key:
+        # Verificar grupo (canonicalizado para tolerar datos stale como "cuadrilla" → "flora_urbana")
+        if canonical_grupo_key(data.get("grupo", "")) != canonical_grupo_key(grupo_key):
             raise HTTPException(status_code=403, detail="El reporte no pertenece al grupo indicado")
 
         # Verificar autoría: operador solo puede editar sus propios reportes
@@ -1289,7 +1363,7 @@ async def patch_campos_reporte(
         raise HTTPException(status_code=500, detail=f"Error actualizando reporte: {str(e)}")
 
 
-@router.post(
+@reports_router.post(
     "/grupos/{grupo_key}/reporte_intervencion",
     summary="🟢 POST | Registrar Reporte de Intervención (Unificado)",
     description="""
@@ -1461,7 +1535,7 @@ async def post_reporte_intervencion_unificado(
     )
 
 
-@router.get(
+@reports_router.get(
     "/grupos/{grupo_key}/reportes_intervenciones",
     summary="🔵 GET | Obtener Reportes de Intervención (Unificado)",
     description="""
@@ -1577,7 +1651,7 @@ async def get_reportes_intervenciones_unificado(
 # ==================== RUTAS LEGACY (backward compatibility) ====================#
 # Las rutas originales /grupo-{name}/... se mantienen como aliases
 
-@router.post("/grupo-cuadrilla/reporte_intervencion", summary="🟢 POST | Reporte Intervención Cuadrilla", response_model=ReconocimientoResponse, include_in_schema=False)
+@legacy_reports_router.post("/grupo-cuadrilla/reporte_intervencion", summary="🟢 POST | Reporte Intervención Cuadrilla", response_model=ReconocimientoResponse, include_in_schema=False)
 async def post_reporte_cuadrilla_legacy(
     tipo_intervencion: Optional[str] = Form(None), descripcion_intervencion: Optional[str] = Form(None),
     arboles_data: Optional[str] = Form(None),
@@ -1586,13 +1660,13 @@ async def post_reporte_cuadrilla_legacy(
     coordinates_data: Optional[str] = Form(None), photos: Optional[List[UploadFile]] = File(None),
 ):
     return await _post_reporte_intervencion(
-        grupo_key="cuadrilla", tipo_intervencion=tipo_intervencion, descripcion_intervencion=descripcion_intervencion,
+        grupo_key="flora_urbana", tipo_intervencion=tipo_intervencion, descripcion_intervencion=descripcion_intervencion,
         direccion=None, grupo=grupo, id_actividad=id_actividad,
         observaciones=observaciones, coordinates_type=coordinates_type, coordinates_data=coordinates_data,
         photos=photos, arboles_data=arboles_data,
     )
 
-@router.post("/grupo-vivero/reporte_intervencion", summary="🟢 POST | Reporte Intervención Vivero", response_model=ReconocimientoResponse, include_in_schema=False)
+@legacy_reports_router.post("/grupo-vivero/reporte_intervencion", summary="🟢 POST | Reporte Intervención Vivero", response_model=ReconocimientoResponse, include_in_schema=False)
 async def post_reporte_vivero_legacy(
     tipo_intervencion: Optional[str] = Form(None), tipos_plantas: Optional[str] = Form(None),
     descripcion_intervencion: Optional[str] = Form(None), direccion: Optional[str] = Form(None),
@@ -1608,7 +1682,7 @@ async def post_reporte_vivero_legacy(
         photos=photos, tipos_plantas=tipos_plantas,
     )
 
-@router.post("/grupo-gobernanza/reporte_intervencion", summary="🟢 POST | Reporte Intervención Gobernanza", response_model=ReconocimientoResponse, include_in_schema=False)
+@legacy_reports_router.post("/grupo-gobernanza/reporte_intervencion", summary="🟢 POST | Reporte Intervención Gobernanza", response_model=ReconocimientoResponse, include_in_schema=False)
 async def post_reporte_gobernanza_legacy(
     tipo_intervencion: Optional[str] = Form(None), unidades_impactadas: Optional[int] = Form(None),
     descripcion_intervencion: Optional[str] = Form(None), direccion: Optional[str] = Form(None),
@@ -1624,7 +1698,7 @@ async def post_reporte_gobernanza_legacy(
         photos=photos, unidades_impactadas=unidades_impactadas,
     )
 
-@router.post("/grupo-ecosistemas/reporte_intervencion", summary="🟢 POST | Reporte Intervención Ecosistemas", response_model=ReconocimientoResponse, include_in_schema=False)
+@legacy_reports_router.post("/grupo-ecosistemas/reporte_intervencion", summary="🟢 POST | Reporte Intervención Ecosistemas", response_model=ReconocimientoResponse, include_in_schema=False)
 async def post_reporte_ecosistemas_legacy(
     tipo_intervencion: Optional[str] = Form(None), unidad_medida: Optional[str] = Form(None),
     unidades_impactadas: Optional[int] = Form(None), descripcion_intervencion: Optional[str] = Form(None),
@@ -1640,7 +1714,7 @@ async def post_reporte_ecosistemas_legacy(
         photos=photos, unidad_medida=unidad_medida, unidades_impactadas=unidades_impactadas,
     )
 
-@router.post("/grupo-umata/reporte_intervencion", summary="🟢 POST | Reporte Intervención UMATA", response_model=ReconocimientoResponse, include_in_schema=False)
+@legacy_reports_router.post("/grupo-umata/reporte_intervencion", summary="🟢 POST | Reporte Intervención UMATA", response_model=ReconocimientoResponse, include_in_schema=False)
 async def post_reporte_umata_legacy(
     tipo_intervencion: Optional[str] = Form(None), unidades_impactadas: Optional[int] = Form(None),
     descripcion_intervencion: Optional[str] = Form(None), direccion: Optional[str] = Form(None),
@@ -1657,35 +1731,57 @@ async def post_reporte_umata_legacy(
     )
 
 
-@router.get("/grupo-cuadrilla/reportes_intervenciones", summary="🔵 GET | Reportes Cuadrilla", include_in_schema=False)
+@legacy_reports_router.get("/grupo-cuadrilla/reportes_intervenciones", summary="🔵 GET | Reportes Cuadrilla", include_in_schema=False)
 async def get_reportes_cuadrilla_legacy(
     id: Optional[str] = Query(None, min_length=1), id_actividad: Optional[str] = Query(None, min_length=1),
     grupo: Optional[str] = Query(None, min_length=1),
 ):
-    return await _get_reportes_intervenciones(grupo_key="cuadrilla", id=id, id_actividad=id_actividad, grupo=grupo)
+    return await _get_reportes_intervenciones(grupo_key="flora_urbana", id=id, id_actividad=id_actividad, grupo=grupo)
 
-@router.get("/grupo-vivero/reportes_intervenciones", summary="🔵 GET | Reportes Vivero", include_in_schema=False)
+@legacy_reports_router.post("/grupo-flora-urbana/reporte_intervencion", summary="🟢 POST | Reporte Intervención Flora Urbana", response_model=ReconocimientoResponse, include_in_schema=False)
+async def post_reporte_flora_urbana_legacy(
+    tipo_intervencion: Optional[str] = Form(None), descripcion_intervencion: Optional[str] = Form(None),
+    arboles_data: Optional[str] = Form(None),
+    grupo: Optional[str] = Form(None), id_actividad: Optional[str] = Form(None),
+    observaciones: Optional[str] = Form(None), coordinates_type: Optional[str] = Form(None),
+    coordinates_data: Optional[str] = Form(None), photos: Optional[List[UploadFile]] = File(None),
+):
+    return await _post_reporte_intervencion(
+        grupo_key="flora_urbana", tipo_intervencion=tipo_intervencion, descripcion_intervencion=descripcion_intervencion,
+        direccion=None, grupo=grupo, id_actividad=id_actividad,
+        observaciones=observaciones, coordinates_type=coordinates_type, coordinates_data=coordinates_data,
+        photos=photos, arboles_data=arboles_data,
+    )
+
+@legacy_reports_router.get("/grupo-flora-urbana/reportes_intervenciones", summary="🔵 GET | Reportes Flora Urbana", include_in_schema=False)
+async def get_reportes_flora_urbana_legacy(
+    id: Optional[str] = Query(None, min_length=1), id_actividad: Optional[str] = Query(None, min_length=1),
+    grupo: Optional[str] = Query(None, min_length=1),
+):
+    return await _get_reportes_intervenciones(grupo_key="flora_urbana", id=id, id_actividad=id_actividad, grupo=grupo)
+
+@legacy_reports_router.get("/grupo-vivero/reportes_intervenciones", summary="🔵 GET | Reportes Vivero", include_in_schema=False)
 async def get_reportes_vivero_legacy(
     id: Optional[str] = Query(None, min_length=1), id_actividad: Optional[str] = Query(None, min_length=1),
     grupo: Optional[str] = Query(None, min_length=1),
 ):
     return await _get_reportes_intervenciones(grupo_key="vivero", id=id, id_actividad=id_actividad, grupo=grupo)
 
-@router.get("/grupo-gobernanza/reportes_intervenciones", summary="🔵 GET | Reportes Gobernanza", include_in_schema=False)
+@legacy_reports_router.get("/grupo-gobernanza/reportes_intervenciones", summary="🔵 GET | Reportes Gobernanza", include_in_schema=False)
 async def get_reportes_gobernanza_legacy(
     id: Optional[str] = Query(None, min_length=1), id_actividad: Optional[str] = Query(None, min_length=1),
     grupo: Optional[str] = Query(None, min_length=1),
 ):
     return await _get_reportes_intervenciones(grupo_key="gobernanza", id=id, id_actividad=id_actividad, grupo=grupo)
 
-@router.get("/grupo-ecosistemas/reportes_intervenciones", summary="🔵 GET | Reportes Ecosistemas", include_in_schema=False)
+@legacy_reports_router.get("/grupo-ecosistemas/reportes_intervenciones", summary="🔵 GET | Reportes Ecosistemas", include_in_schema=False)
 async def get_reportes_ecosistemas_legacy(
     id: Optional[str] = Query(None, min_length=1), id_actividad: Optional[str] = Query(None, min_length=1),
     grupo: Optional[str] = Query(None, min_length=1),
 ):
     return await _get_reportes_intervenciones(grupo_key="ecosistemas", id=id, id_actividad=id_actividad, grupo=grupo)
 
-@router.get("/grupo-umata/reportes_intervenciones", summary="🔵 GET | Reportes UMATA", include_in_schema=False)
+@legacy_reports_router.get("/grupo-umata/reportes_intervenciones", summary="🔵 GET | Reportes UMATA", include_in_schema=False)
 async def get_reportes_umata_legacy(
     id: Optional[str] = Query(None, min_length=1), id_actividad: Optional[str] = Query(None, min_length=1),
     grupo: Optional[str] = Query(None, min_length=1),
@@ -1695,7 +1791,7 @@ async def get_reportes_umata_legacy(
 
 
 # ==================== ENDPOINT 4: Obtener Líderes por Grupo ======================================#
-@router.get(
+@grupos_router.get(
     "/grupos",
     summary="🔵 GET | Obtener Grupos",
     description="""
@@ -1758,7 +1854,7 @@ async def get_grupos(
 
 
 # ==================== ENDPOINT: Crear Grupo ======================================#
-@router.post(
+@grupos_router.post(
     "/grupos",
     summary="🟢 POST | Crear Grupo",
     tags=["Artefacto de Captura DAGMA"],
@@ -1804,7 +1900,7 @@ async def crear_grupo(
 
 
 # ==================== ENDPOINT 5: Obtener Actividades ======================================#
-@router.get(
+@actividades_router.get(
     "/actividades",
     summary="🔵 GET | Obtener Actividades",
     description="""
@@ -2147,7 +2243,7 @@ class ConvocarActividadResponse(BaseModel):
     data: dict
 
 
-@router.post(
+@actividades_router.post(
     "/programar_actividad",
     summary="🟢 POST | Programar Actividad",
     description="""
@@ -2575,7 +2671,7 @@ async def convocar_actividad(
         raise HTTPException(status_code=500, detail=f"Error programando actividad: {str(e)}")
 
 
-@router.delete(
+@actividades_router.delete(
     "/actividades/{actividad_id}",
     summary="🔴 DELETE | Eliminar Actividad",
     description="""
@@ -2629,7 +2725,7 @@ async def delete_actividad(actividad_id: str, background_tasks: BackgroundTasks 
 
         # Enviar correos de cancelación en background (no bloquea la respuesta)
         async def _enviar_cancelaciones():
-            destinatarios = _resolver_destinatarios_actividad(actividad_data_cancel)
+            destinatarios = await _resolver_destinatarios_actividad_async(actividad_data_cancel)
             # Resolver líder de actividad por nombre si no hay email directo en Firestore
             lider_email_canc, lider_nombre_canc = await _resolver_lider_actividad_async(actividad_data_cancel)
             if lider_email_canc:
@@ -2645,15 +2741,15 @@ async def delete_actividad(actividad_id: str, background_tasks: BackgroundTasks 
                     seen_uids: set = set()
                     for rol_field in ("role", "rol"):
                         try:
-                            qs = (
+                            lider_query = (
                                 db.collection("users")
                                 .where(rol_field, "in", ["lider", "líder", "LIDER", "LÍDER"])
                                 .limit(200)
-                                .stream()
                             )
+                            lider_docs = await stream_to_list(lider_query)
                         except Exception:
                             continue
-                        for udoc in await asyncio.to_thread(lambda s=qs: list(s)):
+                        for udoc in lider_docs:
                             if udoc.id in seen_uids:
                                 continue
                             seen_uids.add(udoc.id)
@@ -2702,7 +2798,7 @@ async def delete_actividad(actividad_id: str, background_tasks: BackgroundTasks 
         )
 
 
-@router.put(
+@actividades_router.put(
     "/actividades/{actividad_id}",
     summary="🟡 PUT | Actualizar Actividad",
     description="""
@@ -2824,13 +2920,26 @@ async def update_actividad(
                     logger.warning(f"[CALENDAR] Error sincronizando personal en evento: {e}")
 
             # Emails de asignación/desasignación (background, no bloquea la respuesta)
-            mapa_nuevos = {(v.get("email") or "").strip().lower(): v for v in personal_nuevo if v.get("email")}
-            mapa_anteriores = {(p.get("email") or "").strip().lower(): p for p in personal_anterior if p.get("email")}
+            # Construir mapas iniciales con emails embebidos válidos
+            mapa_nuevos = {(v.get("email") or "").strip().lower(): v for v in personal_nuevo if (v.get("email") or "").strip() and "@" in (v.get("email") or "")}
+            mapa_anteriores = {(p.get("email") or "").strip().lower(): p for p in personal_anterior if (p.get("email") or "").strip() and "@" in (p.get("email") or "")}
+            # Recuperar emails faltantes (personal sin email embebido)
+            _sin_email_nuevos = [v for v in personal_nuevo if not ((v.get("email") or "").strip() and "@" in (v.get("email") or ""))]
+            _sin_email_anteriores = [p for p in personal_anterior if not ((p.get("email") or "").strip() and "@" in (p.get("email") or ""))]
 
             # Bug #3 (2026-05-28): capturar email del actor para suprimir auto-notificaciones.
             actor_email_lower = (getattr(current_user, "email", "") or "").strip().lower()
 
             async def _enviar_emails():
+                # Recuperar emails de personal sin email embebido
+                for _p in _sin_email_nuevos:
+                    _recovered = await _recuperar_email_persona(_p.get("nombre_completo", ""), _p.get("email", ""))
+                    if _recovered:
+                        mapa_nuevos.setdefault(_recovered, _p)
+                for _p in _sin_email_anteriores:
+                    _recovered = await _recuperar_email_persona(_p.get("nombre_completo", ""), _p.get("email", ""))
+                    if _recovered:
+                        mapa_anteriores.setdefault(_recovered, _p)
                 # Resolver datos del LÍDER de la actividad (nombre + teléfono)
                 # para inyectarlos en las plantillas. El campo `telefono` en
                 # `actividad_data` corresponde al COORDINADOR que programó la
@@ -2961,7 +3070,7 @@ async def update_actividad(
             _updated_snapshot = dict(updated_data)
 
             async def _enviar_modificacion():
-                destinatarios = _resolver_destinatarios_actividad(_updated_snapshot)
+                destinatarios = await _resolver_destinatarios_actividad_async(_updated_snapshot)
                 # Resolver líder de actividad por nombre si no hay email directo en Firestore
                 lider_email_mod, lider_nombre_mod = await _resolver_lider_actividad_async(_updated_snapshot)
                 if lider_email_mod:
@@ -3017,7 +3126,7 @@ class PersonalOperativoRequest(BaseModel):
     grupo: str = Field(..., min_length=1, description="Grupo operativo al que pertenece")
 
 
-@router.post(
+@personal_router.post(
     "/personal_operativo",
     summary="🟢 POST | Crear Personal Operativo",
     description="""
@@ -3085,7 +3194,7 @@ async def crear_personal_operativo(
         raise HTTPException(status_code=500, detail=f"Error creando personal operativo: {str(e)}")
 
 
-@router.get(
+@personal_router.get(
     "/personal_operativo",
     summary="🔵 GET | Obtener Personal Operativo",
     description="""
@@ -3146,7 +3255,7 @@ async def get_personal_operativo(
         raise HTTPException(status_code=500, detail=f"Error obteniendo personal operativo: {str(e)}")
 
 
-@router.patch(
+@personal_router.patch(
     "/personal_operativo/verificar-registro",
     summary="🔄 PATCH | Verificar Registro en Users de Personal Operativo",
     description="""
@@ -3257,7 +3366,8 @@ async def verificar_registro_personal(
 
 # ==================== ENDPOINT: Reportes Intervenciones Unificado (todos los grupos) ============#
 
-_GRUPOS_KEYS = ["cuadrilla", "vivero", "gobernanza", "ecosistemas", "umata"]
+# "cuadrilla" kept for dual-read during migration window — remove after migrate_flora_urbana_reportes.py runs
+_GRUPOS_KEYS = ["flora_urbana", "cuadrilla", "vivero", "gobernanza", "ecosistemas", "umata"]
 
 _SLIM_FIELDS = frozenset({
     "id", "timestamp", "grupo", "tipo_intervencion", "barrio_vereda",
@@ -3272,11 +3382,22 @@ async def _fetch_grupo_reportes(grupo_key: str, id_actividad: Optional[str], gru
     get_grupo_config(grupo_key)  # Valida que el grupo es válido
     try:
         ref = db.collection(COLLECTION_REPORTES_INTERVENCIONES)
-        # Siempre filtramos por grupo (campo discriminador en la colección unificada)
-        query = ref.where("grupo", "==", grupo_key)
-        if id_actividad:
-            query = query.where("id_actividad", "==", id_actividad.strip())
-        docs = await stream_to_list(query)
+        # Dual-read: during migration window, flora_urbana reports may still be stored as "cuadrilla"
+        # Remove the extra query once migrate_flora_urbana_reportes.py has been applied to production
+        if grupo_key == "flora_urbana":
+            query_canonical = ref.where("grupo", "==", "flora_urbana")
+            query_legacy = ref.where("grupo", "==", "cuadrilla")
+            if id_actividad:
+                query_canonical = query_canonical.where("id_actividad", "==", id_actividad.strip())
+                query_legacy = query_legacy.where("id_actividad", "==", id_actividad.strip())
+            docs_canonical = await stream_to_list(query_canonical)
+            docs_legacy = await stream_to_list(query_legacy)
+            docs = docs_canonical + docs_legacy
+        else:
+            query = ref.where("grupo", "==", grupo_key)
+            if id_actividad:
+                query = query.where("id_actividad", "==", id_actividad.strip())
+            docs = await stream_to_list(query)
         results = []
         for doc in docs:
             data = doc.to_dict()
@@ -3289,7 +3410,7 @@ async def _fetch_grupo_reportes(grupo_key: str, id_actividad: Optional[str], gru
         return grupo_key, []
 
 
-@router.get(
+@reports_router.get(
     "/reportes_intervenciones",
     summary="🔵 GET | Reportes de Intervención — Todos los Grupos",
     description="""
@@ -3325,6 +3446,7 @@ async def get_reportes_intervenciones_todos(
     response: Response,
     grupo: Optional[str] = Query(None, description="Filtrar por grupo operativo (cuadrilla, vivero, gobernanza, ecosistemas, umata)"),
     id_actividad: Optional[str] = Query(None, description="Filtrar por ID de actividad"),
+    sin_actividad: bool = Query(False, description="Si True, retorna solo reportes sin id_actividad (huérfanos)"),
     page: int = Query(1, ge=1, description="Página a retornar (empieza en 1)"),
     per_page: int = Query(30, ge=1, le=100, description="Registros por página (máx. 100)"),
     slim: bool = Query(False, description="Retornar solo campos esenciales para listado (omite coordinates y detalle)"),
@@ -3340,21 +3462,36 @@ async def get_reportes_intervenciones_todos(
             detail=f"grupo debe ser uno de: {', '.join(_GRUPOS_KEYS)}"
         )
 
-    grupos_a_consultar = [normalize_grupo(grupo)] if grupo else _GRUPOS_KEYS
-
-    tasks = [
-        _fetch_grupo_reportes(g, id_actividad, None)
-        for g in grupos_a_consultar
-    ]
-
-    results = await asyncio.gather(*tasks)
-
-    # Conteos totales por grupo (sobre el dataset completo, sin paginar)
     totals: dict[str, int] = {}
     all_reportes: list[dict] = []
-    for grupo_key, reportes in results:
-        totals[grupo_key] = len(reportes)
-        all_reportes.extend(reportes)
+
+    if grupo:
+        # Filtro específico: query indexada por grupo
+        normalized_grupo = normalize_grupo(grupo)
+        _, group_docs = await _fetch_grupo_reportes(normalized_grupo, id_actividad, None)
+        totals[normalized_grupo] = len(group_docs)
+        all_reportes = group_docs
+    else:
+        # Sin filtro: scan completo de la colección para no perder documentos
+        # con valores de 'grupo' que no coincidan exactamente con _GRUPOS_KEYS
+        try:
+            ref = db.collection(COLLECTION_REPORTES_INTERVENCIONES)
+            query = ref
+            if id_actividad:
+                query = query.where("id_actividad", "==", id_actividad.strip())
+            docs = await stream_to_list(query)
+            for doc in docs:
+                data = doc.to_dict()
+                data["id"] = doc.id
+                all_reportes.append(data)
+                g = data.get("grupo", "")
+                totals[g] = totals.get(g, 0) + 1
+        except Exception as e:
+            logger.warning(f"[reportes_intervenciones] Error leyendo coleccion completa: {e}")
+
+    # Filtro huérfanos: reportes sin actividad asociada
+    if sin_actividad:
+        all_reportes = [r for r in all_reportes if not r.get("id_actividad")]
 
     # Ordenar por timestamp descendente (ISO 8601 es lexicográficamente comparable)
     all_reportes.sort(key=lambda r: r.get("timestamp", ""), reverse=True)
@@ -3400,6 +3537,7 @@ async def get_reportes_intervenciones_todos(
         "filters": {
             "grupo": normalize_grupo(grupo) if grupo else None,
             "id_actividad": id_actividad.strip() if id_actividad else None,
+            "sin_actividad": sin_actividad,
             "slim": slim,
         },
         "timestamp": datetime.now(pytz.timezone("America/Bogota")).isoformat(),
@@ -3464,7 +3602,7 @@ class AsistenciaActividadPatchRequest(BaseModel):
     )
 
 
-@router.get(
+@asistencia_router.get(
     "/alertas_tipos",
     summary="📋 GET | Catálogo de tipos de alerta para asistencia",
     tags=["Artefacto de Captura DAGMA"],
@@ -3480,7 +3618,7 @@ async def get_alertas_tipos():
     ]
 
 
-@router.post(
+@asistencia_router.post(
     "/asistencia_actividades",
     summary="🟢 POST | Registrar Asistencia de Actividad",
     description="""
@@ -3568,7 +3706,7 @@ async def post_asistencia_actividad(
         raise HTTPException(status_code=500, detail=f"Error registrando asistencia: {str(e)}")
 
 
-@router.get(
+@asistencia_router.get(
     "/asistencia_actividades",
     summary="🔵 GET | Obtener Asistencia de Actividad",
     description="""
@@ -3645,7 +3783,7 @@ async def get_asistencia_actividades(
         raise HTTPException(status_code=500, detail=f"Error consultando asistencia: {str(e)}")
 
 
-@router.get(
+@asistencia_router.get(
     "/asistencias_resumen",
     summary="🔵 GET | Listar Resúmenes de Asistencia",
     tags=["Artefacto de Captura DAGMA"],
@@ -3756,7 +3894,7 @@ async def get_asistencias_resumen(
         raise HTTPException(status_code=500, detail=f"Error listando asistencias: {str(e)}")
 
 
-@router.patch(
+@asistencia_router.patch(
     "/asistencia_actividades/{actividad_id}",
     summary="🟡 PATCH | Actualizar Asistencia de Integrante",
     description="""
@@ -3890,7 +4028,7 @@ async def patch_asistencia_actividad(
 
 # ==================== ADMIN: Backfill Geo Data ====================#
 
-@router.post(
+@reports_router.post(
     "/admin/backfill_geo_intervenciones",
     summary="🔧 ADMIN | Recalcular barrio_vereda / comuna_corregimiento en intervenciones",
     tags=["Artefacto de Captura DAGMA"],
@@ -3978,4 +4116,17 @@ async def backfill_geo_intervenciones(
         "errores": errores,
         "detalle": actualizados,
     }
+
+
+# ==================== ROUTER ASSEMBLY ====================#
+# Assemble the module-level `router` that main.py imports.
+# Sub-routers defined above are merged here without altering any paths.
+
+router = APIRouter(tags=["Artefacto de Captura DAGMA"])
+router.include_router(reports_router)
+router.include_router(legacy_reports_router)
+router.include_router(grupos_router)
+router.include_router(actividades_router)
+router.include_router(personal_router)
+router.include_router(asistencia_router)
 

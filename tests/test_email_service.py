@@ -73,6 +73,7 @@ class TestTemplateRendering:
 
 class TestQuotaSystem:
     def test_blocks_at_95_percent(self, monkeypatch):
+        monkeypatch.setattr(gs, "DAILY_EMAIL_QUOTA", 100)
         monkeypatch.setattr(gs, "_count_sent_last_24h", lambda: 95)
         monkeypatch.setattr(gs, "_maybe_alert_quota", lambda c: None)
         sent_raw = MagicMock(return_value=True)
@@ -202,7 +203,7 @@ class TestLiderPhoneInTemplates:
         monkeypatch.setattr(gs, "_log_notification", lambda *a, **k: None)
         captured = {}
 
-        def fake_send_raw(to, subject, html, ics_bytes=None, template=None):
+        def fake_send_raw(to, subject, html, ics_bytes=None, template=None, **kwargs):
             captured["html"] = html
             captured["to"] = to
             return True

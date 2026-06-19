@@ -10,16 +10,19 @@ import logging
 import os
 import io
 import asyncio
-import base64
-import json
 from app.firebase_config import auth_client, db
 from app.models.roles import Role, can_assign_role, normalize_role
 from app.deps.authz import get_current_user, require_min_role, CurrentUser
 from app.utils.firestore_async import run_blocking, stream_to_list
-from app.utils.text_utils import normalize_grupo
+from app.utils.text_utils import normalize_grupo, canonical_grupo_key
 from app.services.gmail_service import (
     send_role_change_email,
     send_grupo_change_email,
+)
+from app.services.auth_service import (
+    verify_token_with_fallback,
+    get_s3_client,
+    get_s3_photo_url,
 )
 from app.limiter import limiter
 
@@ -30,40 +33,6 @@ security = HTTPBearer()
 # so SlowAPIMiddleware enforces these limits correctly at runtime.
 
 logger = logging.getLogger(__name__)
-
-
-# ---------------------------------------------------------------------------
-# Dev token fallback helper
-# ---------------------------------------------------------------------------
-
-def _verify_token_with_fallback(token: str) -> dict:
-    """Verifies a Firebase ID token. In local dev, falls back to unsigned JWT decode
-    when Google's certificate endpoint (port 443) is blocked.
-
-    The fallback activates when ALLOW_UNVERIFIED_JWT=true or in local development environments
-    (when RAILWAY_ENVIRONMENT is not production).
-    """
-    try:
-        return auth_client.verify_id_token(token, check_revoked=True)
-    except Exception as exc:
-        exc_name = type(exc).__name__
-        exc_msg = str(exc)
-        is_cert_error = "CertificateFetchError" in exc_name or "CertificateFetchError" in exc_msg
-        allow_unverified = os.environ.get("ALLOW_UNVERIFIED_JWT", "").lower() == "true"
-        is_local = os.environ.get("RAILWAY_ENVIRONMENT", "local") != "production"
-        if is_cert_error and (allow_unverified or is_local):
-            try:
-                payload_b64 = token.split(".")[1]
-                payload_b64 += "=" * (4 - len(payload_b64) % 4)
-                payload = json.loads(base64.urlsafe_b64decode(payload_b64))
-                uid = payload.get("user_id") or payload.get("sub") or ""
-                if not uid:
-                    raise ValueError("UID vacío en payload JWT")
-                logger.warning(f"[DEV] Cert fetch bloqueado — uid={uid} autenticado sin verificar firma")
-                return {**payload, "uid": uid}
-            except Exception as decode_err:
-                logger.warning(f"[DEV] No se pudo decodificar JWT: {decode_err}")
-        raise
 
 
 # ---------------------------------------------------------------------------
@@ -120,58 +89,6 @@ class CompleteGoogleProfileRequest(BaseModel):
 # Helpers internos
 # ---------------------------------------------------------------------------
 
-# Cliente S3 reutilizado a nivel de modulo para evitar coste de creacion en cada request.
-_S3_CLIENT = None
-_S3_INIT_FAILED = False
-
-
-def _get_s3_client():
-    global _S3_CLIENT, _S3_INIT_FAILED
-    if _S3_CLIENT is not None or _S3_INIT_FAILED:
-        return _S3_CLIENT
-    try:
-        import boto3
-        aws_key = os.getenv("AWS_ACCESS_KEY_ID")
-        aws_secret = os.getenv("AWS_SECRET_ACCESS_KEY")
-        aws_region = os.getenv("AWS_REGION", "us-east-1")
-        if not aws_key or not aws_secret:
-            _S3_INIT_FAILED = True
-            return None
-        _S3_CLIENT = boto3.client(
-            "s3",
-            aws_access_key_id=aws_key,
-            aws_secret_access_key=aws_secret,
-            region_name=aws_region,
-        )
-        return _S3_CLIENT
-    except Exception as e:
-        logger.warning(f"No se pudo inicializar cliente S3: {e}")
-        _S3_INIT_FAILED = True
-        return None
-
-
-def _get_s3_photo_url(s3_key: str) -> Optional[str]:
-    """
-    Genera una URL pre-firmada de S3 para la foto de perfil (válida 7 días).
-    Retorna None si la configuración de S3 no está disponible.
-    """
-    try:
-        bucket = os.getenv("S3_BUCKET_NAME") or os.getenv("AWS_S3_BUCKET_NAME")
-        if not bucket:
-            return None
-        s3 = _get_s3_client()
-        if s3 is None:
-            return None
-        return s3.generate_presigned_url(
-            "get_object",
-            Params={"Bucket": bucket, "Key": s3_key},
-            ExpiresIn=604800,  # 7 días
-        )
-    except Exception as e:
-        logger.warning(f"No se pudo generar presigned URL para {s3_key}: {e}")
-        return None
-
-
 def _get_user_firestore_data(uid: str) -> dict:
     doc = db.collection("users").document(uid).get()
     if doc.exists:
@@ -208,7 +125,7 @@ async def validate_session(credentials: HTTPAuthorizationCredentials = Depends(s
     """
     try:
         token = credentials.credentials
-        decoded_token = _verify_token_with_fallback(token)
+        decoded_token = verify_token_with_fallback(token)
         uid = decoded_token["uid"]
         user = auth_client.get_user(uid)
         fs_data = _get_user_firestore_data(uid)
@@ -235,7 +152,7 @@ async def validate_session(credentials: HTTPAuthorizationCredentials = Depends(s
         photo_url = user.photo_url
         photo_s3_key = fs_data.get("photo_s3_key") if fs_data else None
         if photo_s3_key:
-            refreshed_url = _get_s3_photo_url(photo_s3_key)
+            refreshed_url = get_s3_photo_url(photo_s3_key)
             if refreshed_url:
                 photo_url = refreshed_url
         return {
@@ -265,7 +182,7 @@ async def login_user(credentials: UserLoginRequest, request: Request):
     Valida el ID token del frontend, devuelve datos del usuario con role y grupo.
     """
     try:
-        decoded_token = _verify_token_with_fallback(credentials.id_token)
+        decoded_token = verify_token_with_fallback(credentials.id_token)
         uid = decoded_token["uid"]
         user = auth_client.get_user(uid)
         fs_data = _get_user_firestore_data(uid)
@@ -289,7 +206,7 @@ async def login_user(credentials: UserLoginRequest, request: Request):
         photo_url = user.photo_url
         photo_s3_key = fs_data.get("photo_s3_key") if fs_data else None
         if photo_s3_key:
-            refreshed_url = _get_s3_photo_url(photo_s3_key)
+            refreshed_url = get_s3_photo_url(photo_s3_key)
             if refreshed_url:
                 photo_url = refreshed_url
         return {
@@ -405,7 +322,7 @@ async def complete_google_profile(
         )
     if not body.grupo or not body.grupo.strip():
         raise HTTPException(status_code=400, detail="El campo 'grupo' es obligatorio.")
-    grupo_normalizado = normalize_grupo(body.grupo)
+    grupo_normalizado = canonical_grupo_key(body.grupo)
     if not grupo_normalizado:
         raise HTTPException(status_code=400, detail="El campo 'grupo' es obligatorio.")
     update_data: dict = {
@@ -519,7 +436,7 @@ async def upload_profile_photo(
         raise HTTPException(status_code=500, detail="Error interno al procesar la imagen.")
 
     # Generar presigned URL (7 días)
-    photo_url = _get_s3_photo_url(s3_key)
+    photo_url = get_s3_photo_url(s3_key)
     if not photo_url:
         raise HTTPException(status_code=500, detail="Error al generar URL de la imagen.")
 
@@ -545,7 +462,7 @@ async def google_auth_unified(google_token: str = Form(...)):
     Autenticacion con Google Sign-In. Devuelve role y grupo.
     """
     try:
-        decoded_token = _verify_token_with_fallback(google_token)
+        decoded_token = verify_token_with_fallback(google_token)
         uid = decoded_token["uid"]
         user = auth_client.get_user(uid)
         fs_data = _get_user_firestore_data(uid)
@@ -1013,7 +930,7 @@ async def get_system_stats():
 async def get_firebase_config(credentials: HTTPAuthorizationCredentials = Depends(security)):
     """Configuracion de Firebase para el frontend (requiere token valido)."""
     try:
-        _verify_token_with_fallback(credentials.credentials)
+        verify_token_with_fallback(credentials.credentials)
         return {
             "apiKey": "AIzaSyCQRFYX84gaSzWcOIsT6bGvMGNG1P0I0QI",
             "authDomain": "dagma-85aad.firebaseapp.com",

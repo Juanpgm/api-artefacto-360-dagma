@@ -5,6 +5,7 @@ Configuración basada en gestor_proyecto_api
 import logging
 import os
 import time
+import uuid
 from fastapi import FastAPI, Request
 from starlette.middleware.base import BaseHTTPMiddleware
 from fastapi.middleware.cors import CORSMiddleware
@@ -88,21 +89,23 @@ class _TimingMiddleware(BaseHTTPMiddleware):
 app.add_middleware(_TimingMiddleware)           # innermost
 app.add_middleware(SlowAPIMiddleware)           # rate limiting
 app.add_middleware(GZipMiddleware, minimum_size=1000)  # compression
+# Build CORS allow-list from env (comma-separated) with a safe hardcoded fallback.
+# Add production origins to ALLOWED_ORIGINS in .env — never hardcode them here.
+_env_origins = [o.strip() for o in os.getenv("ALLOWED_ORIGINS", "").split(",") if o.strip()]
+_CORS_ORIGINS = _env_origins or [
+    "http://localhost:3000",
+    "http://localhost:3001",
+    "http://localhost:5173",
+    "http://localhost:5174",
+    "http://localhost:5175",
+    "https://web-production-2d737.up.railway.app",
+    "https://artefacto-calitrack-360-frontend-pr.vercel.app",
+    "https://dagma-360-capture-frontend.vercel.app",
+]
+
 app.add_middleware(                             # outermost — CORS must be last
     CORSMiddleware,
-    allow_origins=[
-        # Desarrollo local
-        "http://localhost:3000",      # React default
-        "http://localhost:3001",      # React alternate
-        "http://localhost:5173",      # Vite default
-        "http://localhost:5174",      # Vite alternate
-        "http://localhost:5175",      # Vite alternate
-        # Producción
-        "https://web-production-2d737.up.railway.app",  # Railway API
-        "https://artefacto-calitrack-360-frontend-pr.vercel.app",  # Frontend Vercel
-        "https://dagma-360-capture-frontend.vercel.app",  # Frontend Vercel (legacy)
-        "https://tu-dominio-produccion.com",   # Dominio custom adicional
-    ],
+    allow_origins=_CORS_ORIGINS,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -122,13 +125,15 @@ app.include_router(notifications_routes.router)
 # Manejador de errores global
 @app.exception_handler(Exception)
 async def global_exception_handler(request, exc):
+    ref = uuid.uuid4().hex[:8]
+    logger.error(
+        "unhandled_exception ref=%s method=%s path=%s: %r",
+        ref, request.method, request.url.path, exc,
+        exc_info=True,
+    )
     return JSONResponse(
         status_code=500,
-        content={
-            "success": False,
-            "error": str(exc),
-            "type": type(exc).__name__
-        }
+        content={"success": False, "error": "Internal server error", "ref": ref},
     )
 
 
