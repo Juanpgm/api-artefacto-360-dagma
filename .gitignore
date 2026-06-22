@@ -58,3 +58,13 @@ cargar-actividades.ipynb
 # OS
 .DS_Store
 Thumbs.db
+
+# Local-only debug/dev scripts (may reference local credential paths — never commit)
+debug_photos_api.py
+check_photos.py
+test_4_reportes_fotos.py
+start_local.ps1
+
+# Local test/run output artifacts
+*_test.txt
+temp.jpg

@@ -136,4 +136,7 @@ if __name__ == "__main__":
     )
     args = parser.parse_args()
     apply_mode = args.apply
+    if apply_mode:
+        from _migration_guard import confirm_apply
+        confirm_apply("grupos")
     run(dry_run=not apply_mode)

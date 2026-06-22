@@ -118,4 +118,7 @@ if __name__ == "__main__":
         help="Actually write changes to Firestore.",
     )
     args = parser.parse_args()
+    if args.apply:
+        from _migration_guard import confirm_apply
+        confirm_apply("plan_distrito_verde")
     run(dry_run=not args.apply)
