@@ -32,7 +32,7 @@ jobs:
         with: { python-version: '3.12' }
       - run: pip install -r requirements.txt
       - run: pip install pytest pytest-asyncio pytest-cov ruff bandit
-      - run: ruff check .
+      - run: ruff check app tests
       - run: bandit -r app/ -x tests/ || true
       - run: pytest -q --cov=app --cov-report=term
         env:

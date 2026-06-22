@@ -7,7 +7,7 @@ from enum import Enum
 from app.models.roles import Role, CurrentUser, normalize_role
 from app.deps.authz import get_current_user, require_min_role
 import asyncio
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 import pytz
 import json
 import uuid
@@ -207,7 +207,6 @@ async def _resolver_destinatarios_actividad_async(actividad_data: dict) -> dict:
     return result
 
 
-import math
 import os
 import io
 import logging
@@ -243,7 +242,6 @@ logger = logging.getLogger(__name__)
 
 # Importar librerías para intersecciones geográficas
 
-from shapely.geometry import Point, shape
 from app.utils.spatial_index import SpatialIndex
 
 router = APIRouter(tags=["Artefacto de Captura DAGMA"])
@@ -306,7 +304,6 @@ def get_location_from_coordinates(coordinates: List) -> tuple:
 
 
 # ==================== FUNCIONES AUXILIARES ====================#
-from app.utils.clean_json import clean_json
 
 
 
@@ -2488,7 +2485,7 @@ async def convocar_actividad(
             # Solo el líder de la actividad debe recibir notificación al programarse una
             # actividad; los líderes de grupo pueden consultar la app. Reintroducir
             # vía opt-in con NOTIFY_GROUP_LEADERS_ON_CREATE=1 si en el futuro se requiere.
-            if not os.getenv("NOTIFY_GROUP_LEADERS_ON_CREATE", "false").strip().lower() in ("1", "true", "yes"):
+            if os.getenv("NOTIFY_GROUP_LEADERS_ON_CREATE", "false").strip().lower() not in ("1", "true", "yes"):
                 logger.info(
                     "[NOTIFY] Aviso a líderes de grupos OMITIDO "
                     "(NOTIFY_GROUP_LEADERS_ON_CREATE no activo)"

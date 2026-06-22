@@ -6,7 +6,7 @@ import uuid
 import logging
 from datetime import datetime, timedelta
 import pytz
-from icalendar import Calendar, Event, Alarm, vText, vDatetime
+from icalendar import Calendar, Event, Alarm
 
 logger = logging.getLogger(__name__)
 
