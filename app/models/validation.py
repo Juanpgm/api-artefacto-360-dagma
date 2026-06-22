@@ -2,8 +2,12 @@ from pydantic import BaseModel, Field, validator, root_validator
 from typing import List, Optional, Any
 
 class CoordinatesModel(BaseModel):
-    coordinates: List[float]
+    # geometry_type MUST be declared before coordinates: Pydantic validates
+    # fields in declaration order, and the coordinates validator reads
+    # geometry_type from `values` — so it has to be validated first, otherwise
+    # the Point range checks are silently skipped (Pydantic v2).
     geometry_type: str
+    coordinates: List[float]
 
     @validator('coordinates')
     def validate_coordinates(cls, v, values):
