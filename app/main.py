@@ -89,19 +89,31 @@ class _TimingMiddleware(BaseHTTPMiddleware):
 app.add_middleware(_TimingMiddleware)           # innermost
 app.add_middleware(SlowAPIMiddleware)           # rate limiting
 app.add_middleware(GZipMiddleware, minimum_size=1000)  # compression
-# Build CORS allow-list from env (comma-separated) with a safe hardcoded fallback.
-# Add production origins to ALLOWED_ORIGINS in .env — never hardcode them here.
+# Build CORS allow-list from env (comma-separated). Prefer ALLOWED_ORIGINS.
+# Fail closed against localhost in production: localhost origins are only used
+# outside production, so a misconfigured prod cannot accept CSRF from localhost.
 _env_origins = [o.strip() for o in os.getenv("ALLOWED_ORIGINS", "").split(",") if o.strip()]
-_CORS_ORIGINS = _env_origins or [
+_is_production = os.getenv("RAILWAY_ENVIRONMENT") == "production"
+_LOCAL_ORIGINS = [
     "http://localhost:3000",
     "http://localhost:3001",
     "http://localhost:5173",
     "http://localhost:5174",
     "http://localhost:5175",
+]
+_PROD_ORIGINS = [
     "https://web-production-2d737.up.railway.app",
     "https://artefacto-calitrack-360-frontend-pr.vercel.app",
     "https://dagma-360-capture-frontend.vercel.app",
 ]
+if _env_origins:
+    _CORS_ORIGINS = _env_origins
+elif _is_production:
+    # No localhost in production. Configure ALLOWED_ORIGINS for any new domain.
+    logger.warning("ALLOWED_ORIGINS no configurado en producción; usando solo orígenes de producción conocidos.")
+    _CORS_ORIGINS = _PROD_ORIGINS
+else:
+    _CORS_ORIGINS = _LOCAL_ORIGINS + _PROD_ORIGINS
 
 app.add_middleware(                             # outermost — CORS must be last
     CORSMiddleware,

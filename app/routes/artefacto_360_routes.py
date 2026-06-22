@@ -366,6 +366,11 @@ def get_s3_client():
 
 # ==================== HELPERS S3: Upload y Presigned URLs ====================#
 
+# Límite de tamaño por foto (defensa contra OOM/DoS). Coincide con el límite del
+# frontend para conversión a canvas (15 MB).
+MAX_PHOTO_BYTES = 15 * 1024 * 1024
+
+
 async def upload_photos_to_s3(photos: List[UploadFile], grupo: str, reporte_id: str, s3_client, bucket_name: str) -> list:
     """
     Sube fotos a S3 y retorna lista de dicts con metadata rica de cada archivo.
@@ -381,7 +386,19 @@ async def upload_photos_to_s3(photos: List[UploadFile], grupo: str, reporte_id: 
         s3_key = f"reportes/{grupo}/{reporte_id}/{photo_filename}"
         if s3_client:
             try:
+                # Rechazar fotos demasiado grandes antes de cargarlas en memoria
+                # cuando el tamaño del part está disponible (Starlette UploadFile.size).
+                if getattr(photo, "size", None) and photo.size > MAX_PHOTO_BYTES:
+                    raise HTTPException(
+                        status_code=413,
+                        detail=f"La foto '{photo.filename}' supera el límite de {MAX_PHOTO_BYTES // (1024 * 1024)} MB",
+                    )
                 photo_content = await photo.read()
+                if len(photo_content) > MAX_PHOTO_BYTES:
+                    raise HTTPException(
+                        status_code=413,
+                        detail=f"La foto '{photo.filename}' supera el límite de {MAX_PHOTO_BYTES // (1024 * 1024)} MB",
+                    )
                 content_type = photo.content_type or "application/octet-stream"
                 # Ejecutar upload S3 (síncrono) en thread para no bloquear el event loop
                 await asyncio.to_thread(
@@ -429,9 +446,29 @@ async def upload_photos_to_s3(photos: List[UploadFile], grupo: str, reporte_id: 
             unique_photos.append(photo)
     photos = unique_photos
 
-    # Ejecutar todas las cargas concurrentemente
+    # Ejecutar todas las cargas concurrentemente. Con return_exceptions=True
+    # ninguna excepción cancela las demás tareas: recolectamos éxitos y errores,
+    # limpiamos las fotos que sí se subieron y propagamos el primer error.
     tasks = [upload_single_photo(i, photo) for i, photo in enumerate(photos)]
-    documentos = await asyncio.gather(*tasks)
+    results = await asyncio.gather(*tasks, return_exceptions=True)
+
+    documentos = [r for r in results if not isinstance(r, Exception)]
+    errors = [r for r in results if isinstance(r, Exception)]
+
+    if errors:
+        if s3_client:
+            for doc in documentos:
+                try:
+                    s3_client.delete_object(Bucket=bucket_name, Key=doc["s3_key"])
+                except Exception as cleanup_err:
+                    logger.warning(
+                        f"No se pudo limpiar foto huérfana en S3 (key={doc.get('s3_key')}): {cleanup_err}"
+                    )
+        first = errors[0]
+        if isinstance(first, HTTPException):
+            raise first
+        raise HTTPException(status_code=500, detail=f"Error subiendo fotos: {first}")
+
     return list(documentos)
 
 
