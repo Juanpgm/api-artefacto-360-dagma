@@ -7,7 +7,7 @@
    ha sido modificado.</p>
 {{ m.kv_table([
   ('Rol anterior', old_role | default('—')),
-  ('Rol nuevo', '<strong>' ~ (new_role | default('—')) ~ '</strong>'),
+  ('Rol nuevo', new_role | default('—')),
   ('Actualizado por', actor_name | default('Administrador')),
   ('Fecha del cambio', timestamp | default('')),
 ]) }}

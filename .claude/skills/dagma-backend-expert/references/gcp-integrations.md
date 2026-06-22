@@ -2,9 +2,49 @@
 
 ## Arquitectura actual
 
-- **Email**: SMTP estándar (`smtplib`) — funciona con Gmail + App Password, sin domain-wide delegation
+- **Email**: estrategia DUAL en `gmail_service.py`:
+  1. **Gmail API (OAuth2)** como transporte PRIMARIO — requiere `GMAIL_CLIENT_ID`,
+     `GMAIL_CLIENT_SECRET`, `GMAIL_REFRESH_TOKEN`, `GMAIL_SENDER`.
+  2. **SMTP (`smtplib`)** como fallback — requiere `SMTP_HOST`, `SMTP_PORT`,
+     `SMTP_USER`, `SMTP_PASSWORD` (App Password de Gmail).
+  Con reintentos (backoff exponencial), control de cuota diaria y registro en
+  `notifications_log`.
 - **Invitaciones de calendario**: Archivo `.ics` adjunto en el correo — compatible con Google Calendar, Outlook, Apple Calendar
 - **Calendario institucional DAGMA**: Google Calendar API con service account (sin impersonación) — crea eventos en el calendario compartido del grupo
+
+---
+
+## Entregabilidad (anti-spam) — CRÍTICO
+
+`_build_mime_message` produce SIEMPRE:
+- `multipart/alternative` con **text/plain + text/html** (nunca solo HTML).
+- Headers `Date` y `Message-ID` (smtplib no los agrega solo).
+- `Reply-To` si `REPLY_TO_EMAIL` está configurado.
+- `List-Unsubscribe` + `List-Unsubscribe-Post: One-Click` en correos masivos
+  (broadcast) — requerido por las reglas de remitentes masivos de Gmail/Yahoo 2024.
+
+El loop de broadcast espacia los envíos (`BROADCAST_PACING_SECONDS`, default 0.4s)
+para no gatillar el rate-limit (429) de Gmail.
+
+### Lo que NO se arregla en código (DNS del dominio remitente)
+
+Si los correos llegan a spam pese a lo anterior, el problema es alineación de
+autenticación del dominio del `From`:
+- **SPF**: `TXT` del dominio debe autorizar al servidor de envío (`include:_spf.google.com` si sale por Google).
+- **DKIM**: el proveedor debe firmar con la clave del dominio. Si se envía con
+  `From: @dominio-propio` pero autenticando con una cuenta `@gmail.com`, la firma
+  NO alinea → spam.
+- **DMARC**: `TXT` en `_dmarc.<dominio>` con `p=quarantine` o `p=reject` y alineación
+  SPF/DKIM. Sin DMARC alineado, Gmail desconfía del remitente.
+
+Regla de oro: el dominio del `From` (`GMAIL_SENDER`) debe coincidir con el dominio
+que firma DKIM. Mezclar dominio propio + cuenta Gmail consumer = spam garantizado.
+
+### Diagnóstico offline
+
+`python scripts/diagnose_email_message.py` construye un mensaje real (sin enviar)
+y verifica la estructura MIME + headers. `GET /admin/notifications/health` reporta
+transporte primario, dominio remitente y flags de configuración.
 
 ---
 
@@ -98,4 +138,5 @@ Solo es necesario habilitar la Calendar API en GCP — no se requiere domain-wid
 2. Buscar **Google Calendar API** → Enable
 3. No se requiere ningún paso adicional en Google Workspace Admin
 
-> La Gmail API ya NO se usa — se reemplazó por SMTP.
+> La Gmail API SÍ se usa para enviar correos (transporte primario); SMTP es el fallback.
+> Para Calendar se usa el service account; para envío de correo se usan credenciales OAuth de Gmail.
