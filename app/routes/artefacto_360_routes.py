@@ -153,21 +153,15 @@ async def _recuperar_email_persona(nombre: str, email_actual: str) -> "str | Non
     target = strip_accents(nombre.strip()).lower()
     # 1. Buscar en users por nombre
     try:
-        for rol_field in ("role", "rol"):
-            try:
-                query = db.collection("users").limit(500)
-                docs = await stream_to_list(query)
-            except Exception:
-                continue
-            for udoc in docs:
-                ud = udoc.to_dict() or {}
-                for campo in ("full_name", "nombre_completo", "displayName"):
-                    nombre_db = (ud.get(campo) or "").strip()
-                    if nombre_db and strip_accents(nombre_db).lower() == target:
-                        email_found = (ud.get("email") or "").strip().lower()
-                        if email_found and "@" in email_found:
-                            return email_found
-            break  # solo un rol_field loop es suficiente para la colección users
+        docs = await stream_to_list(db.collection("users").limit(500))
+        for udoc in docs:
+            ud = udoc.to_dict() or {}
+            for campo in ("full_name", "nombre_completo", "displayName"):
+                nombre_db = (ud.get(campo) or "").strip()
+                if nombre_db and strip_accents(nombre_db).lower() == target:
+                    email_found = (ud.get("email") or "").strip().lower()
+                    if email_found and "@" in email_found:
+                        return email_found
     except Exception as e:
         logger.warning(f"[NOTIFY] Error buscando email de '{nombre}' en users: {e}")
     # 2. Buscar en personal_operativo por nombre_completo
@@ -252,7 +246,7 @@ logger = logging.getLogger(__name__)
 from shapely.geometry import Point, shape
 from app.utils.spatial_index import SpatialIndex
 
-# router is assembled at the bottom of this file via include_router
+router = APIRouter(tags=["Artefacto de Captura DAGMA"])
 
 # ==================== CARGAR GEOJSONS ====================#
 # Cargar los archivos GeoJSON al iniciar la aplicación
@@ -1121,15 +1115,6 @@ async def _enriquecer_con_actividad(reportes: list) -> None:
         reporte["actividad_fecha"] = act.get("fecha_actividad")
 
 
-# ==================== SUB-ROUTERS ====================#
-# These are assembled into `router` at the bottom of this file.
-
-reports_router = APIRouter()
-legacy_reports_router = APIRouter()
-grupos_router = APIRouter()
-actividades_router = APIRouter()
-personal_router = APIRouter()
-asistencia_router = APIRouter()
 
 
 # ==================== RUTAS UNIFICADAS: /grupos/{grupo}/... ====================#
@@ -1140,7 +1125,7 @@ class UpdateCoordenadasRequest(BaseModel):
     coordinates_type: Optional[str] = Field("Point", description="Tipo de geometría GeoJSON")
 
 
-@reports_router.patch(
+@router.patch(
     "/grupos/{grupo_key}/reporte_intervencion/{reporte_id}/coordenadas",
     summary="🟡 PATCH | Actualizar Coordenadas de Reporte",
     description="""
@@ -1208,7 +1193,12 @@ async def patch_coordenadas_reporte(
         # Verificar autoría: operador solo puede editar sus propios reportes
         if not current_user.at_least(Role.LIDER):
             registrado_por = data.get("registrado_por", "")
-            if registrado_por not in (current_user.email, current_user.nombre_completo, current_user.displayName):
+            user_identifiers = {
+                getattr(current_user, "email", None),
+                getattr(current_user, "full_name", None),
+                getattr(current_user, "uid", None),
+            } - {None}
+            if registrado_por not in user_identifiers:
                 raise HTTPException(status_code=403, detail="Solo puedes editar tus propios reportes")
 
         # Construir geometría GeoJSON
@@ -1258,7 +1248,7 @@ class UpdateCamposReporteRequest(BaseModel):
     direccion: Optional[str] = Field(None, max_length=500, description="Nueva dirección")
 
 
-@reports_router.patch(
+@router.patch(
     "/grupos/{grupo_key}/reporte_intervencion/{reporte_id}",
     summary="🟡 PATCH | Editar Campos de Reporte",
     description="""
@@ -1363,7 +1353,7 @@ async def patch_campos_reporte(
         raise HTTPException(status_code=500, detail=f"Error actualizando reporte: {str(e)}")
 
 
-@reports_router.post(
+@router.post(
     "/grupos/{grupo_key}/reporte_intervencion",
     summary="🟢 POST | Registrar Reporte de Intervención (Unificado)",
     description="""
@@ -1535,7 +1525,7 @@ async def post_reporte_intervencion_unificado(
     )
 
 
-@reports_router.get(
+@router.get(
     "/grupos/{grupo_key}/reportes_intervenciones",
     summary="🔵 GET | Obtener Reportes de Intervención (Unificado)",
     description="""
@@ -1651,7 +1641,7 @@ async def get_reportes_intervenciones_unificado(
 # ==================== RUTAS LEGACY (backward compatibility) ====================#
 # Las rutas originales /grupo-{name}/... se mantienen como aliases
 
-@legacy_reports_router.post("/grupo-cuadrilla/reporte_intervencion", summary="🟢 POST | Reporte Intervención Cuadrilla", response_model=ReconocimientoResponse, include_in_schema=False)
+@router.post("/grupo-cuadrilla/reporte_intervencion", summary="🟢 POST | Reporte Intervención Cuadrilla", response_model=ReconocimientoResponse, include_in_schema=False)
 async def post_reporte_cuadrilla_legacy(
     tipo_intervencion: Optional[str] = Form(None), descripcion_intervencion: Optional[str] = Form(None),
     arboles_data: Optional[str] = Form(None),
@@ -1666,7 +1656,7 @@ async def post_reporte_cuadrilla_legacy(
         photos=photos, arboles_data=arboles_data,
     )
 
-@legacy_reports_router.post("/grupo-vivero/reporte_intervencion", summary="🟢 POST | Reporte Intervención Vivero", response_model=ReconocimientoResponse, include_in_schema=False)
+@router.post("/grupo-vivero/reporte_intervencion", summary="🟢 POST | Reporte Intervención Vivero", response_model=ReconocimientoResponse, include_in_schema=False)
 async def post_reporte_vivero_legacy(
     tipo_intervencion: Optional[str] = Form(None), tipos_plantas: Optional[str] = Form(None),
     descripcion_intervencion: Optional[str] = Form(None), direccion: Optional[str] = Form(None),
@@ -1682,7 +1672,7 @@ async def post_reporte_vivero_legacy(
         photos=photos, tipos_plantas=tipos_plantas,
     )
 
-@legacy_reports_router.post("/grupo-gobernanza/reporte_intervencion", summary="🟢 POST | Reporte Intervención Gobernanza", response_model=ReconocimientoResponse, include_in_schema=False)
+@router.post("/grupo-gobernanza/reporte_intervencion", summary="🟢 POST | Reporte Intervención Gobernanza", response_model=ReconocimientoResponse, include_in_schema=False)
 async def post_reporte_gobernanza_legacy(
     tipo_intervencion: Optional[str] = Form(None), unidades_impactadas: Optional[int] = Form(None),
     descripcion_intervencion: Optional[str] = Form(None), direccion: Optional[str] = Form(None),
@@ -1698,7 +1688,7 @@ async def post_reporte_gobernanza_legacy(
         photos=photos, unidades_impactadas=unidades_impactadas,
     )
 
-@legacy_reports_router.post("/grupo-ecosistemas/reporte_intervencion", summary="🟢 POST | Reporte Intervención Ecosistemas", response_model=ReconocimientoResponse, include_in_schema=False)
+@router.post("/grupo-ecosistemas/reporte_intervencion", summary="🟢 POST | Reporte Intervención Ecosistemas", response_model=ReconocimientoResponse, include_in_schema=False)
 async def post_reporte_ecosistemas_legacy(
     tipo_intervencion: Optional[str] = Form(None), unidad_medida: Optional[str] = Form(None),
     unidades_impactadas: Optional[int] = Form(None), descripcion_intervencion: Optional[str] = Form(None),
@@ -1714,7 +1704,7 @@ async def post_reporte_ecosistemas_legacy(
         photos=photos, unidad_medida=unidad_medida, unidades_impactadas=unidades_impactadas,
     )
 
-@legacy_reports_router.post("/grupo-umata/reporte_intervencion", summary="🟢 POST | Reporte Intervención UMATA", response_model=ReconocimientoResponse, include_in_schema=False)
+@router.post("/grupo-umata/reporte_intervencion", summary="🟢 POST | Reporte Intervención UMATA", response_model=ReconocimientoResponse, include_in_schema=False)
 async def post_reporte_umata_legacy(
     tipo_intervencion: Optional[str] = Form(None), unidades_impactadas: Optional[int] = Form(None),
     descripcion_intervencion: Optional[str] = Form(None), direccion: Optional[str] = Form(None),
@@ -1731,14 +1721,14 @@ async def post_reporte_umata_legacy(
     )
 
 
-@legacy_reports_router.get("/grupo-cuadrilla/reportes_intervenciones", summary="🔵 GET | Reportes Cuadrilla", include_in_schema=False)
+@router.get("/grupo-cuadrilla/reportes_intervenciones", summary="🔵 GET | Reportes Cuadrilla", include_in_schema=False)
 async def get_reportes_cuadrilla_legacy(
     id: Optional[str] = Query(None, min_length=1), id_actividad: Optional[str] = Query(None, min_length=1),
     grupo: Optional[str] = Query(None, min_length=1),
 ):
     return await _get_reportes_intervenciones(grupo_key="flora_urbana", id=id, id_actividad=id_actividad, grupo=grupo)
 
-@legacy_reports_router.post("/grupo-flora-urbana/reporte_intervencion", summary="🟢 POST | Reporte Intervención Flora Urbana", response_model=ReconocimientoResponse, include_in_schema=False)
+@router.post("/grupo-flora-urbana/reporte_intervencion", summary="🟢 POST | Reporte Intervención Flora Urbana", response_model=ReconocimientoResponse, include_in_schema=False)
 async def post_reporte_flora_urbana_legacy(
     tipo_intervencion: Optional[str] = Form(None), descripcion_intervencion: Optional[str] = Form(None),
     arboles_data: Optional[str] = Form(None),
@@ -1753,35 +1743,35 @@ async def post_reporte_flora_urbana_legacy(
         photos=photos, arboles_data=arboles_data,
     )
 
-@legacy_reports_router.get("/grupo-flora-urbana/reportes_intervenciones", summary="🔵 GET | Reportes Flora Urbana", include_in_schema=False)
+@router.get("/grupo-flora-urbana/reportes_intervenciones", summary="🔵 GET | Reportes Flora Urbana", include_in_schema=False)
 async def get_reportes_flora_urbana_legacy(
     id: Optional[str] = Query(None, min_length=1), id_actividad: Optional[str] = Query(None, min_length=1),
     grupo: Optional[str] = Query(None, min_length=1),
 ):
     return await _get_reportes_intervenciones(grupo_key="flora_urbana", id=id, id_actividad=id_actividad, grupo=grupo)
 
-@legacy_reports_router.get("/grupo-vivero/reportes_intervenciones", summary="🔵 GET | Reportes Vivero", include_in_schema=False)
+@router.get("/grupo-vivero/reportes_intervenciones", summary="🔵 GET | Reportes Vivero", include_in_schema=False)
 async def get_reportes_vivero_legacy(
     id: Optional[str] = Query(None, min_length=1), id_actividad: Optional[str] = Query(None, min_length=1),
     grupo: Optional[str] = Query(None, min_length=1),
 ):
     return await _get_reportes_intervenciones(grupo_key="vivero", id=id, id_actividad=id_actividad, grupo=grupo)
 
-@legacy_reports_router.get("/grupo-gobernanza/reportes_intervenciones", summary="🔵 GET | Reportes Gobernanza", include_in_schema=False)
+@router.get("/grupo-gobernanza/reportes_intervenciones", summary="🔵 GET | Reportes Gobernanza", include_in_schema=False)
 async def get_reportes_gobernanza_legacy(
     id: Optional[str] = Query(None, min_length=1), id_actividad: Optional[str] = Query(None, min_length=1),
     grupo: Optional[str] = Query(None, min_length=1),
 ):
     return await _get_reportes_intervenciones(grupo_key="gobernanza", id=id, id_actividad=id_actividad, grupo=grupo)
 
-@legacy_reports_router.get("/grupo-ecosistemas/reportes_intervenciones", summary="🔵 GET | Reportes Ecosistemas", include_in_schema=False)
+@router.get("/grupo-ecosistemas/reportes_intervenciones", summary="🔵 GET | Reportes Ecosistemas", include_in_schema=False)
 async def get_reportes_ecosistemas_legacy(
     id: Optional[str] = Query(None, min_length=1), id_actividad: Optional[str] = Query(None, min_length=1),
     grupo: Optional[str] = Query(None, min_length=1),
 ):
     return await _get_reportes_intervenciones(grupo_key="ecosistemas", id=id, id_actividad=id_actividad, grupo=grupo)
 
-@legacy_reports_router.get("/grupo-umata/reportes_intervenciones", summary="🔵 GET | Reportes UMATA", include_in_schema=False)
+@router.get("/grupo-umata/reportes_intervenciones", summary="🔵 GET | Reportes UMATA", include_in_schema=False)
 async def get_reportes_umata_legacy(
     id: Optional[str] = Query(None, min_length=1), id_actividad: Optional[str] = Query(None, min_length=1),
     grupo: Optional[str] = Query(None, min_length=1),
@@ -1791,7 +1781,7 @@ async def get_reportes_umata_legacy(
 
 
 # ==================== ENDPOINT 4: Obtener Líderes por Grupo ======================================#
-@grupos_router.get(
+@router.get(
     "/grupos",
     summary="🔵 GET | Obtener Grupos",
     description="""
@@ -1854,7 +1844,7 @@ async def get_grupos(
 
 
 # ==================== ENDPOINT: Crear Grupo ======================================#
-@grupos_router.post(
+@router.post(
     "/grupos",
     summary="🟢 POST | Crear Grupo",
     tags=["Artefacto de Captura DAGMA"],
@@ -1900,7 +1890,7 @@ async def crear_grupo(
 
 
 # ==================== ENDPOINT 5: Obtener Actividades ======================================#
-@actividades_router.get(
+@router.get(
     "/actividades",
     summary="🔵 GET | Obtener Actividades",
     description="""
@@ -2243,7 +2233,7 @@ class ConvocarActividadResponse(BaseModel):
     data: dict
 
 
-@actividades_router.post(
+@router.post(
     "/programar_actividad",
     summary="🟢 POST | Programar Actividad",
     description="""
@@ -2671,7 +2661,7 @@ async def convocar_actividad(
         raise HTTPException(status_code=500, detail=f"Error programando actividad: {str(e)}")
 
 
-@actividades_router.delete(
+@router.delete(
     "/actividades/{actividad_id}",
     summary="🔴 DELETE | Eliminar Actividad",
     description="""
@@ -2798,7 +2788,7 @@ async def delete_actividad(actividad_id: str, background_tasks: BackgroundTasks 
         )
 
 
-@actividades_router.put(
+@router.put(
     "/actividades/{actividad_id}",
     summary="🟡 PUT | Actualizar Actividad",
     description="""
@@ -3126,7 +3116,7 @@ class PersonalOperativoRequest(BaseModel):
     grupo: str = Field(..., min_length=1, description="Grupo operativo al que pertenece")
 
 
-@personal_router.post(
+@router.post(
     "/personal_operativo",
     summary="🟢 POST | Crear Personal Operativo",
     description="""
@@ -3194,7 +3184,7 @@ async def crear_personal_operativo(
         raise HTTPException(status_code=500, detail=f"Error creando personal operativo: {str(e)}")
 
 
-@personal_router.get(
+@router.get(
     "/personal_operativo",
     summary="🔵 GET | Obtener Personal Operativo",
     description="""
@@ -3255,7 +3245,7 @@ async def get_personal_operativo(
         raise HTTPException(status_code=500, detail=f"Error obteniendo personal operativo: {str(e)}")
 
 
-@personal_router.patch(
+@router.patch(
     "/personal_operativo/verificar-registro",
     summary="🔄 PATCH | Verificar Registro en Users de Personal Operativo",
     description="""
@@ -3410,7 +3400,7 @@ async def _fetch_grupo_reportes(grupo_key: str, id_actividad: Optional[str], gru
         return grupo_key, []
 
 
-@reports_router.get(
+@router.get(
     "/reportes_intervenciones",
     summary="🔵 GET | Reportes de Intervención — Todos los Grupos",
     description="""
@@ -3602,7 +3592,7 @@ class AsistenciaActividadPatchRequest(BaseModel):
     )
 
 
-@asistencia_router.get(
+@router.get(
     "/alertas_tipos",
     summary="📋 GET | Catálogo de tipos de alerta para asistencia",
     tags=["Artefacto de Captura DAGMA"],
@@ -3618,7 +3608,7 @@ async def get_alertas_tipos():
     ]
 
 
-@asistencia_router.post(
+@router.post(
     "/asistencia_actividades",
     summary="🟢 POST | Registrar Asistencia de Actividad",
     description="""
@@ -3706,7 +3696,7 @@ async def post_asistencia_actividad(
         raise HTTPException(status_code=500, detail=f"Error registrando asistencia: {str(e)}")
 
 
-@asistencia_router.get(
+@router.get(
     "/asistencia_actividades",
     summary="🔵 GET | Obtener Asistencia de Actividad",
     description="""
@@ -3783,7 +3773,7 @@ async def get_asistencia_actividades(
         raise HTTPException(status_code=500, detail=f"Error consultando asistencia: {str(e)}")
 
 
-@asistencia_router.get(
+@router.get(
     "/asistencias_resumen",
     summary="🔵 GET | Listar Resúmenes de Asistencia",
     tags=["Artefacto de Captura DAGMA"],
@@ -3894,7 +3884,7 @@ async def get_asistencias_resumen(
         raise HTTPException(status_code=500, detail=f"Error listando asistencias: {str(e)}")
 
 
-@asistencia_router.patch(
+@router.patch(
     "/asistencia_actividades/{actividad_id}",
     summary="🟡 PATCH | Actualizar Asistencia de Integrante",
     description="""
@@ -4028,7 +4018,7 @@ async def patch_asistencia_actividad(
 
 # ==================== ADMIN: Backfill Geo Data ====================#
 
-@reports_router.post(
+@router.post(
     "/admin/backfill_geo_intervenciones",
     summary="🔧 ADMIN | Recalcular barrio_vereda / comuna_corregimiento en intervenciones",
     tags=["Artefacto de Captura DAGMA"],
@@ -4118,15 +4108,4 @@ async def backfill_geo_intervenciones(
     }
 
 
-# ==================== ROUTER ASSEMBLY ====================#
-# Assemble the module-level `router` that main.py imports.
-# Sub-routers defined above are merged here without altering any paths.
-
-router = APIRouter(tags=["Artefacto de Captura DAGMA"])
-router.include_router(reports_router)
-router.include_router(legacy_reports_router)
-router.include_router(grupos_router)
-router.include_router(actividades_router)
-router.include_router(personal_router)
-router.include_router(asistencia_router)
 
