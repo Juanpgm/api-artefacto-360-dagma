@@ -4,7 +4,6 @@ Rutas de monitoreo - Métricas y monitoring
 from fastapi import APIRouter
 from prometheus_client import Counter, Histogram, Gauge, generate_latest, CONTENT_TYPE_LATEST
 from fastapi.responses import Response
-from datetime import datetime
 
 router = APIRouter(tags=["Monitoring"])
 

@@ -6,18 +6,19 @@ Estrategia dual:
 Si ninguno está configurado, el envío falla silenciosamente con un log de advertencia.
 """
 import os
+import re
 import base64
 import smtplib
 import socket
 import time
 import logging
-import hashlib
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 from email.mime.base import MIMEBase
 from email import encoders
+from email.utils import formatdate, make_msgid
 
 from jinja2 import Environment, FileSystemLoader, select_autoescape
 from google.oauth2.credentials import Credentials
@@ -170,21 +171,88 @@ def _get_gmail_service():
     return build('gmail', 'v1', credentials=creds, cache_discovery=False)
 
 
+def _html_to_text(html: str) -> str:
+    """Convierte un cuerpo HTML a texto plano legible para la parte text/plain.
+
+    No pretende ser un renderizador completo: elimina <style>/<script>, conserva
+    el destino de los enlaces (`texto (url)`), colapsa el resto de etiquetas y
+    normaliza el espaciado. El objetivo es que TODO correo lleve una alternativa
+    de texto plano — su ausencia es una de las señales de spam más penalizadas.
+    """
+    if not html:
+        return ''
+    text = re.sub(r'(?is)<(script|style).*?</\1>', '', html)
+    # Desescapar entidades ANTES de remover etiquetas. Si una plantilla autoescapa
+    # pseudo-etiquetas (ej. `&lt;strong&gt;`), al desescaparlas se vuelven etiquetas
+    # reales y el stripping posterior las elimina — evita que `<strong>` se filtre
+    # al texto plano.
+    replacements = {
+        '&nbsp;': ' ', '&amp;': '&', '&lt;': '<', '&gt;': '>',
+        '&quot;': '"', '&#39;': "'", '&mdash;': '—', '&ndash;': '–',
+    }
+    for ent, ch in replacements.items():
+        text = text.replace(ent, ch)
+    # Saltos de línea para bloques comunes antes de remover etiquetas.
+    text = re.sub(r'(?i)<\s*br\s*/?\s*>', '\n', text)
+    text = re.sub(r'(?i)</\s*(p|div|tr|h[1-6]|li)\s*>', '\n', text)
+    # Conservar el destino de los enlaces: <a href="URL">texto</a> -> texto (URL)
+    text = re.sub(
+        r'(?is)<a[^>]*href=["\']([^"\']+)["\'][^>]*>(.*?)</a>',
+        lambda m: f"{re.sub(r'<[^>]+>', '', m.group(2))} ({m.group(1)})",
+        text,
+    )
+    text = re.sub(r'(?s)<[^>]+>', '', text)  # remover el resto de etiquetas
+    text = re.sub(r'[ \t]+', ' ', text)
+    text = re.sub(r'\n\s*\n\s*\n+', '\n\n', text)
+    return text.strip()
+
+
 def _build_mime_message(sender: str, sender_name: str, to: str, subject: str,
-                        html_body: str, ics_bytes: bytes = None) -> MIMEMultipart:
-    """Construye el objeto MIMEMultipart listo para enviar (compartido por Gmail API y SMTP)."""
-    msg = MIMEMultipart('mixed')
-    msg['From'] = f"{sender_name} <{sender}>"
-    msg['To'] = to
-    msg['Subject'] = subject
-    msg.attach(MIMEText(html_body, 'html', 'utf-8'))
+                        html_body: str, ics_bytes: bytes = None,
+                        list_unsubscribe: str = None) -> MIMEMultipart:
+    """Construye el objeto MIME listo para enviar (compartido por Gmail API y SMTP).
+
+    Estructura:
+      - Sin adjunto: ``multipart/alternative`` con text/plain + text/html.
+      - Con .ics: ``multipart/mixed`` que envuelve el ``multipart/alternative``
+        y el adjunto ``text/calendar``.
+
+    Headers de entregabilidad incluidos SIEMPRE: ``Date`` y ``Message-ID``
+    (smtplib no los agrega solo; su ausencia es señal de spam). ``List-Unsubscribe``
+    se añade solo para correos masivos/broadcast cuando se provee.
+    """
+    sender_domain = sender.split('@')[-1] if '@' in sender else 'localhost'
+
+    # Parte alternativa: texto plano + HTML (en ese orden de preferencia ascendente).
+    alternative = MIMEMultipart('alternative')
+    alternative.attach(MIMEText(_html_to_text(html_body), 'plain', 'utf-8'))
+    alternative.attach(MIMEText(html_body, 'html', 'utf-8'))
+
     if ics_bytes:
+        msg = MIMEMultipart('mixed')
+        outer = msg
+        msg.attach(alternative)
         part = MIMEBase('text', 'calendar', method='REQUEST', charset='utf-8')
         part.set_payload(ics_bytes)
         encoders.encode_base64(part)
         part.add_header('Content-Disposition', 'attachment', filename='actividad_dagma.ics')
         part.add_header('Content-Type', 'text/calendar; method=REQUEST; charset=utf-8')
         msg.attach(part)
+    else:
+        msg = alternative
+        outer = msg
+
+    outer['From'] = f"{sender_name} <{sender}>"
+    outer['To'] = to
+    outer['Subject'] = subject
+    outer['Date'] = formatdate(localtime=True)
+    outer['Message-ID'] = make_msgid(domain=sender_domain)
+    reply_to = os.getenv('REPLY_TO_EMAIL', '')
+    if reply_to:
+        outer['Reply-To'] = reply_to
+    if list_unsubscribe:
+        outer['List-Unsubscribe'] = list_unsubscribe
+        outer['List-Unsubscribe-Post'] = 'List-Unsubscribe=One-Click'
     return msg
 
 
@@ -256,7 +324,7 @@ def _send_via_smtp(msg: MIMEMultipart, to: str) -> bool:
 
 def _send_raw_email(to: str, subject: str, html_body: str,
                     ics_bytes: bytes = None, template: str = '',
-                    max_attempts: int = 3) -> bool:
+                    max_attempts: int = 3, list_unsubscribe: str = None) -> bool:
     """Envío directo sin chequeo de cuota (uso interno y para alertas).
 
     Reintenta hasta `max_attempts` veces con backoff exponencial ante fallos
@@ -268,7 +336,8 @@ def _send_raw_email(to: str, subject: str, html_body: str,
     ok = False
     last_error = ''
     try:
-        msg = _build_mime_message(sender, sender_name, to, subject, html_body, ics_bytes)
+        msg = _build_mime_message(sender, sender_name, to, subject, html_body, ics_bytes,
+                                  list_unsubscribe=list_unsubscribe)
         gmail_configured = bool(
             os.getenv('GMAIL_CLIENT_ID') and
             os.getenv('GMAIL_CLIENT_SECRET') and
@@ -325,7 +394,8 @@ def _send_raw_email(to: str, subject: str, html_body: str,
 
 def _send_email(to: str, subject: str, html_body: str,
                 ics_bytes: bytes = None, template: str = '',
-                critical: bool = False, max_attempts: int = 3) -> bool:
+                critical: bool = False, max_attempts: int = 3,
+                list_unsubscribe: str = None) -> bool:
     """
     Envía un correo con adjunto iCal opcional y control de cuota diaria.
     Si se supera el 95% de la cuota diaria, NO envía y registra el bloqueo —
@@ -344,7 +414,7 @@ def _send_email(to: str, subject: str, html_body: str,
         return False
     _maybe_alert_quota(count)
     return _send_raw_email(to, subject, html_body, ics_bytes=ics_bytes, template=template,
-                           max_attempts=max_attempts)
+                           max_attempts=max_attempts, list_unsubscribe=list_unsubscribe)
 
 
 def _google_maps_url(actividad_data: dict) -> str:
@@ -736,7 +806,19 @@ def send_broadcast_email(
             'cta_url': cta_url,
             'cta_label': cta_label,
         })
-        return _send_email(to, subject, html, template='broadcast')
+        # Correo masivo: List-Unsubscribe es obligatorio bajo las reglas de
+        # remitentes masivos de Gmail/Yahoo (2024). Usamos un mailto al remitente
+        # o, si está configurado, una URL de baja por un solo clic.
+        sender = os.getenv('GMAIL_SENDER') or os.getenv('SMTP_USER', '')
+        unsub_url = os.getenv('LIST_UNSUBSCRIBE_URL', '')
+        parts = []
+        if unsub_url:
+            parts.append(f'<{unsub_url}>')
+        if sender:
+            parts.append(f'<mailto:{sender}?subject=unsubscribe>')
+        list_unsubscribe = ', '.join(parts) or None
+        return _send_email(to, subject, html, template='broadcast',
+                           list_unsubscribe=list_unsubscribe)
     except Exception as e:
         logger.error(f"[EMAIL] Error enviando broadcast a {to}: {e}")
         return False
@@ -808,13 +890,19 @@ def get_notifications_health() -> dict:
         os.getenv('GMAIL_CLIENT_ID') and os.getenv('GMAIL_CLIENT_SECRET')
         and os.getenv('GMAIL_REFRESH_TOKEN')
     )
+    sender = os.getenv('GMAIL_SENDER') or os.getenv('SMTP_USER', '')
+    sender_domain = sender.split('@')[-1] if '@' in sender else ''
     return {
         'smtp_configured': smtp_ok,
         'gmail_api_configured': gmail_ok,
+        'primary_transport': 'gmail_api' if gmail_ok else ('smtp' if smtp_ok else 'none'),
         'smtp_host': os.getenv('SMTP_HOST', ''),
         'smtp_port': int(os.getenv('SMTP_PORT', '587') or 587),
-        'sender': os.getenv('GMAIL_SENDER') or os.getenv('SMTP_USER', ''),
+        'sender': sender,
+        'sender_domain': sender_domain,
         'sender_name': os.getenv('SMTP_SENDER_NAME', ''),
+        'reply_to_configured': bool(os.getenv('REPLY_TO_EMAIL', '')),
+        'list_unsubscribe_url_configured': bool(os.getenv('LIST_UNSUBSCRIBE_URL', '')),
         'frontend_url': os.getenv('FRONTEND_URL', ''),
         'daily_quota': DAILY_EMAIL_QUOTA,
         'sent_last_24h': count,

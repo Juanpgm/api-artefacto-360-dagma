@@ -1,5 +1,5 @@
-from pydantic import BaseModel, Field, validator, root_validator
-from typing import List, Optional, Any
+from pydantic import BaseModel, validator, root_validator
+from typing import List
 
 class CoordinatesModel(BaseModel):
     # geometry_type MUST be declared before coordinates: Pydantic validates

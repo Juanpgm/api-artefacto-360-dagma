@@ -817,7 +817,7 @@ async def get_estadisticas(
         
         historial_ref = db.collection('historial_avance_reportes') \
             .where('fecha', '>=', fecha_hace_30_dias) \
-            .order_by('fecha', direction=firestore.Query.ASCENDING)
+            .order_by('fecha', direction=_firestore_module.Query.ASCENDING)
         
         historial_docs = await stream_to_list(historial_ref)
         

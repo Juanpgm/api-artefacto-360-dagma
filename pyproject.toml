@@ -1,0 +1,15 @@
+[tool.ruff]
+line-length = 120
+target-version = "py312"
+extend-exclude = [".venv", "basemaps"]
+
+[tool.ruff.lint]
+# E402 (import no al inicio) es INTENCIONAL en este proyecto: app/main.py y varias
+# rutas importan tras configurar entorno/sys.path, y los tests fijan os.environ
+# antes de importar el módulo bajo prueba.
+# F841 (variable asignada sin usar) es ruido heredado; se endurecerá por separado.
+ignore = ["E402", "F841"]
+
+[tool.ruff.lint.per-file-ignores]
+"__init__.py" = ["F401"]
+"tests/**" = ["F401", "F811"]

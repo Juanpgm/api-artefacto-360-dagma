@@ -33,7 +33,6 @@ _perf_logger = logging.getLogger("dagma.perf")
 _SLOW_REQUEST_MS = float(os.getenv("SLOW_REQUEST_MS", "1000"))
 
 # Importar configuración de Firebase
-from app.firebase_config import db, auth_client
 
 # Importar routers
 from app.routes import (

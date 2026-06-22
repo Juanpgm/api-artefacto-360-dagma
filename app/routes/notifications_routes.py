@@ -6,6 +6,7 @@ Endpoints de notificaciones administrativas:
 """
 from __future__ import annotations
 import os
+import time
 import logging
 from typing import Optional, List, Literal
 
@@ -96,11 +97,17 @@ def _resolve_audience(audience: str) -> List[tuple[str, str]]:
     return out
 
 
+# Pausa entre envíos de un broadcast para no gatillar el rate-limit de Gmail
+# (envíos masivos demasiado rápidos devuelven 429 y algunos correos no salen).
+BROADCAST_PACING_SECONDS = float(os.getenv("BROADCAST_PACING_SECONDS", "0.4"))
+
+
 def _do_broadcast(recipients: list[tuple[str, str]], subject: str,
                   message_html: str, priority: str, cta_url: str, cta_label: str) -> None:
     sent = 0
     errors: list[str] = []
-    for email, _ in recipients:
+    total = len(recipients)
+    for idx, (email, _) in enumerate(recipients):
         try:
             ok = send_broadcast_email(
                 to=email,
@@ -116,7 +123,10 @@ def _do_broadcast(recipients: list[tuple[str, str]], subject: str,
                 errors.append(email)
         except Exception as e:
             errors.append(f"{email}: {e}")
-    logger.info(f"[BROADCAST] subject={subject!r} sent={sent}/{len(recipients)} errors={len(errors)}")
+        # Espaciar los envíos salvo en el último destinatario.
+        if BROADCAST_PACING_SECONDS > 0 and idx < total - 1:
+            time.sleep(BROADCAST_PACING_SECONDS)
+    logger.info(f"[BROADCAST] subject={subject!r} sent={sent}/{total} errors={len(errors)}")
 
 
 @router.post("/admin/notifications/broadcast",

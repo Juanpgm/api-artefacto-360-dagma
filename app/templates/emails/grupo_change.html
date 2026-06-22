@@ -7,7 +7,7 @@
    ha sido modificado.</p>
 {{ m.kv_table([
   ('Grupo anterior', old_grupo | default('—')),
-  ('Grupo nuevo', '<strong>' ~ (new_grupo | default('—')) ~ '</strong>'),
+  ('Grupo nuevo', new_grupo | default('—')),
   ('Actualizado por', actor_name | default('Administrador')),
   ('Fecha del cambio', timestamp | default('')),
 ]) }}

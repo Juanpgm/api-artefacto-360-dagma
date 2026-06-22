@@ -21,7 +21,6 @@ from app.services.gmail_service import (
 )
 from app.services.auth_service import (
     verify_token_with_fallback,
-    get_s3_client,
     get_s3_photo_url,
 )
 from app.limiter import limiter
