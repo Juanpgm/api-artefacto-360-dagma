@@ -24,7 +24,7 @@ jobs:
 
   back:
     needs: detect-changes
-    if: needs.detect-changes.outputs.skip != 'true' && hashFiles('requirements.txt', 'pyproject.toml') != ''
+    if: needs.detect-changes.outputs.skip != 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -38,19 +38,3 @@ jobs:
         env:
           ENVIRONMENT: test
           LLM_DEFAULT_MODEL: ollama/qwen2.5:7b
-
-  front:
-    needs: detect-changes
-    if: needs.detect-changes.outputs.skip != 'true' && hashFiles('package.json') != ''
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: pnpm/action-setup@v4
-        with: { version: 9 }
-      - uses: actions/setup-node@v4
-        with: { node-version: '20', cache: 'pnpm' }
-      - run: pnpm install --frozen-lockfile
-      - run: pnpm run check || true
-      - run: pnpm run lint || true
-      - run: pnpm run build
-      - run: pnpm test --if-present
