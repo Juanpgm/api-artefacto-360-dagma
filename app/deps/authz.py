@@ -12,10 +12,7 @@ Uso:
     async def eliminar(...):
         ...
 """
-import base64
-import json
 import logging
-import os
 from typing import Callable, Optional
 
 from fastapi import Depends, HTTPException, status
@@ -123,42 +120,18 @@ async def get_current_user(
     """
     token = credentials.credentials
 
+    # Always verify the signature. For local development without outbound access
+    # to Google's certificate endpoint, run the Firebase Auth Emulator and set
+    # FIREBASE_AUTH_EMULATOR_HOST — the Admin SDK then validates emulator-issued
+    # tokens here without any signature bypass. See back/README.md.
     try:
         decoded_token = auth_client.verify_id_token(token, check_revoked=True)
     except Exception as exc:
-        exc_name = type(exc).__name__
-        exc_msg = str(exc)
-
-        # In local dev, Firebase can't fetch Google's public keys if port 443 is blocked.
-        # Fall back to decoding the JWT payload (no signature check) to extract the UID,
-        # then hydrate the role from Firestore — never from the unverified token.
-        is_cert_error = "CertificateFetchError" in exc_name or "CertificateFetchError" in exc_msg
-        is_local = os.environ.get("RAILWAY_ENVIRONMENT", "local") != "production"
-
-        if is_cert_error and is_local:
-            try:
-                payload_b64 = token.split(".")[1]
-                payload_b64 += "=" * (4 - len(payload_b64) % 4)
-                payload = json.loads(base64.urlsafe_b64decode(payload_b64))
-                uid = payload.get("user_id") or payload.get("sub") or ""
-                if not uid:
-                    raise ValueError("UID vacío en payload JWT")
-                decoded_token = {**payload, "uid": uid}
-                logger.warning(
-                    f"[DEV] Cert fetch bloqueado — uid={uid} autenticado sin verificar firma"
-                )
-            except Exception as decode_err:
-                logger.warning(f"[DEV] No se pudo decodificar JWT: {decode_err}")
-                raise HTTPException(
-                    status_code=status.HTTP_401_UNAUTHORIZED,
-                    detail="Token inválido o revocado",
-                )
-        else:
-            logger.warning(f"Token de Firebase rechazado: {type(exc).__name__}: {exc}")
-            raise HTTPException(
-                status_code=status.HTTP_401_UNAUTHORIZED,
-                detail="Token inválido o revocado",
-            )
+        logger.warning(f"Token de Firebase rechazado: {type(exc).__name__}: {exc}")
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Token inválido o revocado",
+        )
 
     # Intentar claims primero (más rápido, sin leer Firestore)
     current_user = _build_current_user_from_claims(decoded_token)
