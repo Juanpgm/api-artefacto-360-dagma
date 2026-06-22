@@ -239,9 +239,9 @@ class TestUnifiedPostEndpoint:
         saved = mock_firebase_db.collection.return_value.document.return_value.set.call_args[0][0]
         assert saved["grupo"] == "flora_urbana"
 
-    def test_post_sin_auth_retorna_403(self):
+    def test_post_sin_auth_retorna_401(self):
         r = client.post("/grupos/flora_urbana/reporte_intervencion", data={"tipo_intervencion": "T"})
-        assert r.status_code == 403  # HTTPBearer returns 403 when Authorization header is missing
+        assert r.status_code == 401  # HTTPBearer returns 401 (Unauthorized) when Authorization header is missing
 
     def test_legacy_cuadrilla_url_still_works(self, mock_firebase_db, mock_s3, mock_auth):
         """Backward-compat: /grupos/cuadrilla/... still resolves via canonical_grupo_key mapping."""
@@ -305,9 +305,9 @@ class TestUnifiedGetEndpoint:
             assert r.status_code == 200, f"{grupo}: {r.text}"
             mock_firebase_db.collection.assert_called_with("reportes_intervenciones")
 
-    def test_get_sin_auth_retorna_403(self):
+    def test_get_sin_auth_retorna_401(self):
         r = client.get("/grupos/flora_urbana/reportes_intervenciones")
-        assert r.status_code == 403  # HTTPBearer returns 403 when Authorization header is missing
+        assert r.status_code == 401  # HTTPBearer returns 401 (Unauthorized) when Authorization header is missing
 
 
 class TestLegacyRoutes:

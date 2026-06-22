@@ -1,10 +1,13 @@
 """
 Rutas generales - Health checks y endpoints de utilidad
 """
-from fastapi import APIRouter
+from fastapi import APIRouter, Depends
 from datetime import datetime, timezone
 import platform
 import os
+
+from app.deps.authz import require_min_role
+from app.models.roles import Role
 
 router = APIRouter(tags=["General"])
 
@@ -50,10 +53,11 @@ async def test_utf8():
         "message": "Todos los caracteres UTF-8 funcionan correctamente ✓"
     }
 
-@router.get("/debug/railway")
+@router.get("/debug/railway", dependencies=[Depends(require_min_role(Role.ADMINISTRADOR))])
 async def railway_debug():
     """
-    Debug específico para Railway - Diagnóstico simplificado
+    Debug específico para Railway - Diagnóstico simplificado.
+    Requiere rol administrador o superior (no exponer infra públicamente).
     """
     return {
         "platform": platform.system(),

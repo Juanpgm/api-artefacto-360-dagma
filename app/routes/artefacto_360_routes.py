@@ -903,8 +903,10 @@ async def _post_reporte_intervencion(
                 for doc in documentos:
                     try:
                         s3_client.delete_object(Bucket=bucket_name, Key=doc["s3_key"])
-                    except:
-                        pass
+                    except Exception as cleanup_err:
+                        logger.warning(
+                            f"No se pudo limpiar foto huérfana en S3 (key={doc.get('s3_key')}): {cleanup_err}"
+                        )
             raise HTTPException(
                 status_code=500,
                 detail=f"Error guardando en Firebase: {str(e)}"
